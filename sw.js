@@ -1,6 +1,6 @@
 const CACHE_NAME = 'pyramid-res-v1';
 const urlsToCache = [
-    './SoundPlayer.html',
+    './index.html',
     './app.js',
     './manifest.json'
 ];

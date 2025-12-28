@@ -1,7 +1,7 @@
 {
   "name": "Pyramid Resonance Player",
   "short_name": "PyramidRes",
-  "start_url": "./SoundPlayer.html",
+  "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#000000",
   "theme_color": "#000000",
