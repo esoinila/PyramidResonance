@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pyramid Resonance Player</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: #000;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            text-align: center;
+        }
+
+        button {
+            background: #d4af37;
+            border: none;
+            padding: 15px 30px;
+            font-size: 1.2rem;
+            margin: 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            color: #000;
+            font-weight: bold;
+            transition: opacity 0.2s;
+        }
+
+        button:active {
+            opacity: 0.8;
+        }
+
+        button:disabled {
+            background: #555;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Pyramid Resonance</h1>
+    <p>F# Chord Earth Harmonic</p>
+    <div id="controls">
+        <button id="play">Play Resonance</button>
+        <button id="stop" disabled>Stop</button>
+    </div>
+    <script src="app.js"></script>
+</body>
+
+</html>
