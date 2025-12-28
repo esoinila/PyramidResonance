@@ -27,7 +27,9 @@ The app calculates and plays resonant frequencies for the known chambers of the 
 
 The frequencies are derived using the formula for resonant frequencies in a rectangular room:
 
-\[ f_{n_x, n_y, n_z} = \frac{v}{2} \sqrt{ \left( \frac{n_x}{L} \right)^2 + \left( \frac{n_y}{W} \right)^2 + \left( \frac{n_z}{H} \right)^2 } \]
+$$
+f_{n_x, n_y, n_z} = \frac{v}{2} \sqrt{ \left( \frac{n_x}{L} \right)^2 + \left( \frac{n_y}{W} \right)^2 + \left( \frac{n_z}{H} \right)^2 }
+$$
 
 Where:
 - \( v \) = speed of sound (~1126 ft/s)
