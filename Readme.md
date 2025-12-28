@@ -72,7 +72,7 @@ No installation required; it's pure HTML/JavaScript.
 - **Petrie's Measurements**: Exact dimensions from W.M. Flinders Petrie's *The Pyramids and Temples of Gizeh* (1883). Full text available [here (PDF)](https://gizamedia.rc.fas.harvard.edu/images/MFA-images/Giza/GizaImage/full/library/petrie_gizeh.pdf). Key averages: Length 412.35 inches, Width 206.26 inches, Height 230.39 inches.
 - **Schumann Resonance Connection**: Pyramid resonances may align with Earth's electromagnetic resonances. Fundamental Schumann ~7.83 Hz; octaves include ~15.66 Hz (close to the chamber's fundamental ~16 Hz). See [Wikipedia on Schumann resonances](https://en.wikipedia.org/wiki/Schumann_resonances).
 
-This project is for educational and experimental purposes—test it in the pyramid if you get the chance!
+This project is for educational purposes. 
 
 ## License
 
