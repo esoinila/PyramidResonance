@@ -4,64 +4,198 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pyramid Resonance Player</title>
+    <title>Pyramid Resonance</title>
     <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="icon.svg" type="image/svg+xml">
+    <meta name="theme-color" content="#000000">
     <style>
+        :root {
+            --bg: #000;
+            --panel: #141414;
+            --line: #2c2c2c;
+            --text: #fff;
+            --muted: #a8a8a8;
+            --gold: #d4af37;
+            --gold-dim: #6f5c1d;
+            --bad: #ff8a80;
+        }
+
+        * { box-sizing: border-box; }
+
         body {
             font-family: system-ui, -apple-system, sans-serif;
-            background-color: #000;
-            color: #fff;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
+            background: var(--bg);
+            color: var(--text);
             margin: 0;
-            text-align: center;
+            line-height: 1.4;
         }
+
+        main { max-width: 640px; margin: 0 auto; padding: 16px 14px 48px; }
+        h1 { font-size: 1.5rem; margin: 6px 0 2px; text-align: center; }
+        h2 { font-size: 1rem; margin: 0 0 10px; color: var(--gold); }
+        .sub { text-align: center; color: var(--muted); margin: 0 0 14px; font-size: .9rem; }
+
+        .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 12px 0; }
 
         button {
-            background: #d4af37;
+            background: var(--gold);
             border: none;
-            padding: 15px 30px;
-            font-size: 1.2rem;
-            margin: 10px;
-            border-radius: 5px;
+            padding: 12px 16px;
+            font-size: 1rem;
+            border-radius: 8px;
             cursor: pointer;
             color: #000;
-            font-weight: bold;
-            transition: opacity 0.2s;
+            font-weight: 700;
+            min-height: 44px;
         }
+        button:active { opacity: .8; }
+        button:disabled { background: #555; color: #999; cursor: not-allowed; }
+        button.ghost { background: transparent; color: var(--gold); border: 1px solid var(--gold); }
+        button.on { background: #fff; }
 
-        button:active {
-            opacity: 0.8;
+        select, input[type=number] {
+            padding: 10px;
+            font-size: 1rem;
+            background: #222;
+            color: #fff;
+            border: 1px solid var(--gold-dim);
+            border-radius: 8px;
+            width: 100%;
+            min-height: 44px;
         }
+        input[type=range] { width: 100%; accent-color: var(--gold); height: 32px; }
+        label { font-size: .8rem; color: var(--muted); display: grid; gap: 4px; }
 
-        button:disabled {
-            background: #555;
-            cursor: not-allowed;
+        .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+        .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+        .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .row > button { flex: 1; }
+        .mt { margin-top: 10px; }
+        .hint { color: var(--muted); font-size: .82rem; margin: 8px 0 0; }
+        .warn { color: var(--bad); font-size: .85rem; margin: 8px 0 0; min-height: 1.2em; }
+
+        #now { text-align: center; padding: 8px 0 2px; }
+        #nowFreq { font-size: 2.2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+        #nowInfo { color: var(--muted); font-size: .9rem; min-height: 1.3em; }
+
+        #modeList { max-height: 300px; overflow-y: auto; margin-top: 10px; border-top: 1px solid var(--line); }
+        .mode {
+            display: grid; grid-template-columns: 5.2em 5.6em 1fr; gap: 6px; align-items: center;
+            width: 100%; text-align: left; background: transparent; color: var(--text);
+            border: 0; border-bottom: 1px solid var(--line); border-radius: 0;
+            padding: 10px 6px; font-weight: 400; font-size: .95rem; font-variant-numeric: tabular-nums;
         }
+        .mode b { font-weight: 700; }
+        .mode span { color: var(--muted); }
+        .mode.active { background: #2a230b; }
+        .mode.active b { color: var(--gold); }
+
+        #meter { height: 14px; background: #222; border-radius: 7px; overflow: hidden; margin-top: 10px; }
+        #meterBar { height: 100%; width: 0; background: var(--gold); }
+        #meterText { font-variant-numeric: tabular-nums; color: var(--muted); font-size: .85rem; margin-top: 4px; }
+
+        canvas { width: 100%; height: 220px; display: block; background: #0b0b0b; border-radius: 8px; }
+        table { width: 100%; border-collapse: collapse; font-size: .9rem; font-variant-numeric: tabular-nums; margin-top: 8px; }
+        th, td { text-align: left; padding: 5px 4px; border-bottom: 1px solid var(--line); }
+        th { color: var(--muted); font-weight: 400; }
     </style>
 </head>
 
 <body>
-    <h1>Pyramid Resonance</h1>
-    <p>Resonant Frequencies of Giza</p>
+    <main>
+        <h1>Pyramid Resonance</h1>
+        <p class="sub">Find the notes a stone room rings at</p>
 
-    <div id="selector-container" style="margin-bottom: 20px;">
-        <label for="pyramid-select" style="font-size: 1.1rem; margin-right: 10px;">Select Pyramid:</label>
-        <select id="pyramid-select"
-            style="padding: 10px; font-size: 1rem; background: #333; color: white; border: 1px solid #d4af37; border-radius: 5px;">
-            <option value="khufu">Khufu (Great Pyramid)</option>
-            <option value="khafre">Khafre</option>
-            <option value="menkaure">Menkaure</option>
-        </select>
-    </div>
+        <div class="card">
+            <h2>Room</h2>
+            <label>Chamber
+                <select id="room">
+                    <option value="khufu">Khufu: King's Chamber</option>
+                    <option value="khafre">Khafre: burial chamber</option>
+                    <option value="menkaure">Menkaure: burial chamber</option>
+                    <option value="custom">Custom room (enter size)</option>
+                </select>
+            </label>
+            <div class="grid3 mt">
+                <label>Length m <input type="number" id="dimL" min="0.5" max="100" step="0.01" inputmode="decimal"></label>
+                <label>Width m <input type="number" id="dimW" min="0.5" max="100" step="0.01" inputmode="decimal"></label>
+                <label>Height m <input type="number" id="dimH" min="0.5" max="100" step="0.01" inputmode="decimal"></label>
+            </div>
+            <div class="grid3 mt">
+                <label>Air °C <input type="number" id="temp" min="-20" max="50" step="1" inputmode="decimal"></label>
+                <label>From Hz <input type="number" id="fMin" min="10" max="2000" step="1" inputmode="decimal"></label>
+                <label>To Hz <input type="number" id="fMax" min="20" max="4000" step="1" inputmode="decimal"></label>
+            </div>
+            <p class="hint" id="roomNote"></p>
+            <p class="warn" id="roomWarn"></p>
+        </div>
 
-    <div id="controls">
-        <button id="play">Play Resonance</button>
-        <button id="stop" disabled>Stop</button>
-    </div>
+        <div class="card">
+            <div id="now">
+                <div id="nowFreq">–</div>
+                <div id="nowInfo">Nothing playing</div>
+            </div>
+            <label class="mt">Volume <input type="range" id="volume" min="0" max="1" step="0.01"></label>
+            <div class="row mt">
+                <button id="stop" disabled>Stop</button>
+            </div>
+            <p class="warn" id="audioWarn"></p>
+        </div>
+
+        <div class="card">
+            <h2>Single tones</h2>
+            <label>Which modes
+                <select id="modeFilter">
+                    <option value="axial">Axial only (strongest)</option>
+                    <option value="tangential">Axial + tangential</option>
+                    <option value="all">All modes</option>
+                </select>
+            </label>
+            <div class="row mt">
+                <button id="prev" class="ghost">◀ Previous</button>
+                <button id="next" class="ghost">Next ▶</button>
+            </div>
+            <div id="modeList" role="list"></div>
+            <p class="hint">One tone at a time. A resonance is a tone that sounds clearly louder than its neighbours. Put the speaker in a corner and stand in another corner.</p>
+        </div>
+
+        <div class="card">
+            <h2>Sweep</h2>
+            <div class="grid2">
+                <label>Duration
+                    <select id="sweepDur">
+                        <option value="30">30 s</option>
+                        <option value="60">60 s</option>
+                        <option value="120">120 s</option>
+                    </select>
+                </label>
+                <label>&nbsp;<button id="sweep">Start sweep</button></label>
+            </div>
+            <p class="hint">Glides slowly from "From Hz" to "To Hz". With the microphone on, the level is plotted below.</p>
+        </div>
+
+        <div class="card">
+            <h2>Microphone</h2>
+            <div class="row">
+                <button id="mic" class="ghost">Turn microphone on</button>
+                <button id="clap" class="ghost" disabled>Record a clap (4 s)</button>
+            </div>
+            <div id="meter"><div id="meterBar"></div></div>
+            <div id="meterText">Microphone off</div>
+            <p class="hint">Nothing is recorded or sent anywhere. If the tone gets quiet or moves to the phone's earpiece when the microphone is on, turn it off and judge by ear.</p>
+            <p class="warn" id="micWarn"></p>
+        </div>
+
+        <div class="card">
+            <h2 id="chartTitle">Measurement</h2>
+            <canvas id="chart" width="1200" height="440" role="img" aria-label="Measured level against frequency with predicted room modes"></canvas>
+            <p class="hint" id="chartHint">Run a sweep or record a clap with the microphone on. Gold line: measured level. Ticks along the top: the predicted modes listed above (long ticks are axial).</p>
+            <div id="peaks"></div>
+        </div>
+
+        <p class="hint">Model: rigid rectangular room. Real rooms have openings, sloped ceilings and people in them, so expect measured peaks within a few percent of the prediction, not on it. The curve also contains your speaker's and microphone's own response.</p>
+    </main>
+    <script src="modes.js"></script>
     <script src="app.js"></script>
 </body>
 
