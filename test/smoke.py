@@ -91,8 +91,21 @@ def serve(root=ROOT):
 LIVE = "window.__osc.live.size"
 PEAKS = "[...document.querySelectorAll('#peaks tr')].filter(r => r.querySelector('td')).map(r => [...r.children].map(c => c.textContent))"
 
-async def new_page(browser, url, pre=''):
-    ctx = await browser.new_context(viewport={'width': 390, 'height': 844}, device_scale_factor=2, service_workers='block')
+SHARE_MOCK = r"""
+window.__shares = [];
+navigator.canShare = (d) => !!(d && d.files && d.files.length);
+navigator.share = async (d) => {
+  if (window.__SHARE_REFUSE_ONCE) { window.__SHARE_REFUSE_ONCE = false; const e = new Error('no gesture'); e.name = 'NotAllowedError'; throw e; }
+  const files = [];
+  for (const f of d.files) files.push({ name: f.name, type: f.type, size: f.size, text: f.type === 'application/json' ? await f.text() : null });
+  window.__shares.push({ title: d.title, text: d.text, files });
+};
+0;
+"""
+
+async def new_page(browser, url, pre='', geo='grant'):
+    ctx = await browser.new_context(viewport={'width': 390, 'height': 844}, device_scale_factor=2, service_workers='block',
+        permissions=['geolocation'] if geo == 'grant' else [], geolocation={'latitude': -13.509812345, 'longitude': -71.981712345, 'accuracy': 7})
     page = await ctx.new_page()
     errors = []
     page.on('pageerror', lambda e: errors.append(str(e)))
@@ -257,7 +270,107 @@ async def main():
         check(wl['requested'] == wl['released'], 'wake lock balanced at the end', wl)
         check(await page.evaluate("window.__tracks.every(t => t.readyState === 'ended')"), 'the microphone is released when turned off')
         check(not errors, 'no page errors (microphone)', errors)
+
+        # ---- saving the measurement, with location, photo and sending
+        import json, base64
+        check(await page.evaluate("!saveBox.hidden && !saveBtn.disabled"), 'a finished clap can be saved')
+        await page.evaluate(SHARE_MOCK)
+        await page.fill('#saveNote', 'Test room, niche 3')
+        await page.click('#saveBtn')
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 1", timeout=5000)
+        check(await page.evaluate("saveBtn.disabled && saveBtn.textContent === 'Saved'"), 'the same measurement cannot be saved twice')
+        await page.wait_for_function("document.querySelector('#savedList [data-role=location]').textContent.includes('-13.50981')", timeout=20000)
+        loc = await page.evaluate("document.querySelector('#savedList [data-role=location]').textContent")
+        check('-71.98171' in loc and '±7 m' in loc and 'improving' not in loc, 'the location is stored with its accuracy', loc)
+        check((await page.evaluate("document.querySelector('#savedList .rec a').href")).startswith('https://maps.google.com/?q=-13.509812,-71.981712'), 'with a map link')
+        check('Test room, niche 3' in await page.evaluate("document.querySelector('#savedList .rec b').textContent"), 'the note is shown')
+
+        # a second measurement, then look at the first again
+        await page.click('#mic'); await page.wait_for_timeout(900)
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        check(await page.evaluate("!saveBox.hidden && !saveBtn.disabled"), 'a new measurement can be saved again')
+        await page.click('#saveBtn')
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 2", timeout=5000)
+        check(await page.evaluate("!shareAll.hidden"), 'two saved measurements offer "send all"')
+        await page.click('#savedList .rec:last-child [data-role=show]'); await page.wait_for_timeout(300)
+        check(await page.evaluate("chartTitle.textContent.startsWith('Saved: ') && chartTitle.textContent.includes('niche 3') && saveBox.hidden"), 'a saved measurement can be shown again', await page.evaluate("chartTitle.textContent"))
+        check('117' in await page.evaluate("peaks.textContent"), 'with its peaks')
+        await page.click('#next'); await page.wait_for_timeout(300)
+        check(await page.evaluate("chartTitle.textContent.includes('clap spectrum') && !saveBox.hidden"), 'playing a tone returns to the live measurement')
+        await page.click('#stop', force=True); await page.wait_for_timeout(200)
+
+        # photo
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==')
+        big = await page.evaluate("""(async () => { const c = document.createElement('canvas'); c.width = 3200; c.height = 2400; const g = c.getContext('2d'); g.fillStyle = '#964'; g.fillRect(0, 0, 3200, 2400);
+            const b = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.8)); const a = new Uint8Array(await b.arrayBuffer()); let s = ''; for (const v of a) s += String.fromCharCode(v); return btoa(s); })()""")
+        async with page.expect_file_chooser() as fc:
+            await page.click('#savedList .rec:last-child [data-role=photo]')
+        await (await fc.value).set_files({'name': 'IMG_0001.jpg', 'mimeType': 'image/jpeg', 'buffer': base64.b64decode(big)})
+        await page.wait_for_function("document.querySelector('#savedList .rec:last-child img') && document.querySelector('#savedList .rec:last-child img').naturalWidth > 0", timeout=8000)
+        check(await page.evaluate("document.querySelector('#savedList .rec:last-child img').naturalWidth") == 1600, 'a photo is attached, reduced to 1600 px')
+        async with page.expect_file_chooser() as fc:
+            await page.click('#savedList .rec:first-child [data-role=photo]')
+        await (await fc.value).set_files({'name': 'notes.txt', 'mimeType': 'text/plain', 'buffer': b'not a picture'})
+        await page.wait_for_function("savedMsg.textContent.includes('could not be added')", timeout=5000)
+        check(await page.evaluate("document.querySelectorAll('#savedList img').length") == 1, 'a file that is not a picture is refused with a message', await page.evaluate("savedMsg.textContent"))
+
+        # sending: refused once (no tap), then sent on the second tap
+        await page.evaluate("window.__SHARE_REFUSE_ONCE = true")
+        await page.click('#savedList .rec:last-child [data-role=share]')
+        await page.wait_for_function("document.querySelector('#savedList .rec:last-child [data-role=share]').textContent === 'Tap to send'", timeout=5000)
+        await page.click('#savedList .rec:last-child [data-role=share]'); await page.wait_for_timeout(500)
+        shares = await page.evaluate("window.__shares")
+        names = [f['name'] for f in shares[0]['files']] if shares else []
+        check(len(shares) == 1 and len(names) == 3 and names[0].endswith('-test-room-niche-3.json') and names[1].endswith('-chart.png') and names[2].endswith('-photo.jpg'), 'sending one measurement gives data, chart and photo', names)
+        data = json.loads(shares[0]['files'][0]['text']) if shares else {}
+        check(data.get('schema') == 'pyramid-resonance-measurement/1' and len(data.get('curve', [])) > 50 and abs(data['location']['lat'] + 13.509812) < 1e-6
+              and data['location']['accuracyM'] == 7 and data['note'] == 'Test room, niche 3' and data['photo']['width'] == 1600 and data['kind'] == 'clap'
+              and any(abs(p['f'] - F0) < 3 for p in data['peaks']), 'the data file holds the spectrum, peaks, place and note', {k: data.get(k) for k in ('time', 'location', 'peaks')})
+        check('Location: -13.50981' in shares[0]['text'] and 'maps.google.com' in shares[0]['text'], 'and the message text names the place')
+        check(shares[0]['files'][1]['size'] > 3000 and shares[0]['files'][2]['size'] > 3000, 'chart and photo files are not empty')
+        await page.click('#shareAll'); await page.wait_for_timeout(500)
+        shares = await page.evaluate("window.__shares")
+        everything = json.loads(shares[-1]['files'][0]['text'])
+        check(len(shares) == 2 and everything['count'] == 2 and everything['measurements'][0]['note'] == 'Test room, niche 3', '"send all" gives one file with both, oldest first')
+
+        # still there after closing and reopening the app
+        await page.reload()
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 2", timeout=5000)
+        await page.wait_for_function("document.querySelector('#savedList .rec:last-child img') && document.querySelector('#savedList .rec:last-child img').naturalWidth === 1600", timeout=5000)
+        check(True, 'saved measurements and the photo survive a restart')
+        check('improving' not in await page.evaluate("savedList.textContent") and 'Getting location' not in await page.evaluate("savedList.textContent"), 'no location search is left hanging')
+
+        # delete needs two taps
+        await page.click('#savedList .rec:first-child [data-role=delete]'); await page.wait_for_timeout(200)
+        check(await page.evaluate("document.querySelectorAll('#savedList .rec').length") == 2, 'one tap on Delete does not delete')
+        await page.click('#savedList .rec:first-child [data-role=delete]')
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 1", timeout=5000)
+        await page.reload()
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 1", timeout=5000)
+        check('niche 3' in await page.evaluate("savedList.textContent"), 'the second tap deletes that one for good')
+        check(not errors, 'no page errors (saving)', errors)
         await page.screenshot(path=os.environ.get('SHOT', '/tmp/smoke.png'), full_page=True)
+        await page.close()
+
+        # ---- location refused: the measurement is still saved
+        page, errors = await new_page(browser, url, geo='deny')
+        await page.click('#mic'); await page.wait_for_timeout(900)
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        await page.click('#saveBtn')
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 1", timeout=5000)
+        await page.wait_for_function("document.querySelector('#savedList [data-role=location]').textContent.includes('not allowed')", timeout=20000)
+        check(True, 'with location refused the measurement is saved and says why it has no place')
+        check(not errors, 'no page errors (no location)', errors)
         await page.close()
 
         # ---- offline cache and updates, with the real service worker, on a copy of the site

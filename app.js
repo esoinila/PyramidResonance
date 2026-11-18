@@ -3,11 +3,12 @@
     'use strict';
 
     const M = window.Modes;
+    const R = window.Records;
     const $ = (id) => document.getElementById(id);
 
     // Must equal VERSION in sw.js (a test checks it). Change both for every release:
     // the new sw.js is what makes phones fetch the new files, all at once.
-    const BUILD = '2.0.0';
+    const BUILD = '2.1.0';
     const MATCH_TOL = 1.5;    // percent: how close a measured peak must be to a listed mode
 
     if ('serviceWorker' in navigator) {
@@ -300,6 +301,7 @@
         const idx = ((i % shown.length) + shown.length) % shown.length;
         const m = shown[idx];
         lastIdx = idx;   // before the await, so quick taps step on
+        leaveViewing();
         try {
             await ensureCtx();
             if (clapBusy) return;
@@ -329,6 +331,18 @@
 
     // ---------- Sweep ----------
     let curve = [];           // measured points [{ f, db }]
+    let curveState = 'none';  // 'none' | 'done' (a finished measurement is on screen) | 'saved'
+    let viewing = null;       // a saved record being shown in place of the live measurement
+    let lastPeaks = [];       // the peaks in the table, as saved with a measurement
+    let livePeaks = null;     // what showPeaks was last given, to redraw the table after viewing a saved record
+
+    // Back from a saved record to whatever was measured last
+    function leaveViewing() {
+        if (!viewing) return;
+        viewing = null;
+        $('peaks').textContent = '';
+        if (curveState !== 'none' && livePeaks) showPeaks(livePeaks);
+    }
     let curveKind = '';       // 'sweep' | 'clap'
     let recording = false;    // this sweep is being measured
     let disturbed = false;    // volume was changed while recording
@@ -354,12 +368,13 @@
             $('audioWarn').textContent = 'Set "To Hz" higher than "From Hz" in the Room card first.';
             return;
         }
+        leaveViewing();
         try {
             await ensureCtx();
             if (clapBusy) return;
             abortSweep();
             recording = micOn;
-            if (recording) { curve = []; curveKind = 'sweep'; disturbed = false; $('peaks').textContent = ''; }
+            if (recording) { curve = []; curveState = 'none'; viewing = null; curveKind = 'sweep'; disturbed = false; $('peaks').textContent = ''; }
             lastReadF = 0;
             setActive(-1);
             startVoice('sweep', settings.fMin, settings.fMax, settings.sweepDur);
@@ -408,8 +423,10 @@
         abortSweep();
         const wasRecording = recording;
         recording = false;
-        if (wasRecording && curveKind === 'sweep' && curve.length > 10) showPeaks(M.findPeaks(curve, 4, 30));   // +-30 points is about +-12 %: wide enough for a broad peak
-        else if (wasRecording) showPeaks([]);
+        if (wasRecording && curveKind === 'sweep' && curve.length > 10) {
+            curveState = 'done';
+            showPeaks(M.findPeaks(curve, 4, 30));   // +-30 points is about +-12 %: wide enough for a broad peak
+        } else if (wasRecording) showPeaks([]);
     }
 
     // ---------- Microphone ----------
@@ -530,6 +547,7 @@
             return;
         }
         if (voice) stopAll();
+        leaveViewing();
         clapBusy = true;
         const run = ++clapRun;
         $('micWarn').textContent = '';
@@ -583,9 +601,10 @@
             }
             clearInterval(clapTimer); clapTimer = null;
             clapBusy = false;
-            curve = [];
+            curve = []; viewing = null;
             for (let k = k0; k <= k1; k++) if (Number.isFinite(hold[k - k0])) curve.push({ f: k * binHz, db: hold[k - k0] });
             curveKind = 'clap';
+            curveState = 'done';
             disturbed = false;
             setClapButton();
             setButtons();
@@ -600,10 +619,14 @@
     function showPeaks(peaks) {
         const host = $('peaks');
         host.textContent = '';
+        livePeaks = peaks;
+        lastPeaks = [];
         const note = (text) => { const p = document.createElement('p'); p.className = 'hint'; p.textContent = text; host.appendChild(p); };
         if (!peaks.length) {
             if (curveKind === 'sweep' && settings.fMax / settings.fMin < 1.25) {
                 note('No clear peaks found. This range is too narrow to tell a peak from its surroundings: widen "From Hz" and "To Hz" so the sweep covers more than the peak itself.');
+            } else if (curveKind === 'clap') {
+                note('No clear peaks found. Soft furniture soaks up the ringing: try a sharper, louder clap, or a bare room with hard walls.');
             } else {
                 note('No clear peaks found. Try more volume, a corner position, or a longer sweep.');
             }
@@ -625,6 +648,7 @@
             let measured = p.f.toFixed(1) + ' Hz';
             if (p.edge) { measured += ' (edge)'; anyEdge = true; }
             if (p.echo) { measured += ' (old tone?)'; anyEcho = true; }
+            lastPeaks.push(Object.assign({}, p, { nearest, miss }));
             const tr = document.createElement('tr');
             [measured, noteText(p.f), nearest, miss].forEach((c) => { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); });
             table.appendChild(tr);
@@ -646,22 +670,12 @@
         }
     }
 
-    function drawChart(cursorF) {
-        const cv = $('chart');
-        const dpr = window.devicePixelRatio || 1;
-        const Wd = cv.clientWidth || 320, Hd = cv.clientHeight || 220;
-        if (cv.width !== Math.round(Wd * dpr) || cv.height !== Math.round(Hd * dpr)) {
-            cv.width = Math.round(Wd * dpr);
-            cv.height = Math.round(Hd * dpr);
-        }
-        cv.dataset.points = String(curve.length);   // for tests
-        const g = cv.getContext('2d');
-        g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // Paint one chart. o: { f1, f2, curve: [{ f, db }], marks: modes to tick along the top, cursor: Hz or null }
+    function paintChart(g, Wd, Hd, o) {
         const padL = 52, padR = 10, padT = 24, padB = 22;
         g.fillStyle = '#0b0b0b';
         g.fillRect(0, 0, Wd, Hd);
-        $('chartTitle').textContent = curveKind === 'clap' ? 'Measurement: clap spectrum' : curveKind === 'sweep' ? 'Measurement: sweep' : 'Measurement';
-        const f1 = settings.fMin, f2 = settings.fMax;
+        const f1 = o.f1, f2 = o.f2;
         if (!(f2 > f1) || !(f1 > 0)) return;
         const x = (f) => padL + (Wd - padL - padR) * Math.log(f / f1) / Math.log(f2 / f1);
         g.font = '11px system-ui, sans-serif';
@@ -681,16 +695,18 @@
             g.textAlign = 'center';
         }
         // predicted modes (the ones listed under "Single tones")
-        shown.forEach((m) => {
+        (o.marks || []).forEach((m) => {
+            if (m.f < f1 || m.f > f2) return;
             const axial = m.type === 'axial';
             g.strokeStyle = axial ? '#d4af37' : '#6f5c1d';
             g.lineWidth = axial ? 2 : 1;
             g.beginPath(); g.moveTo(x(m.f), 3); g.lineTo(x(m.f), axial ? 18 : 10); g.stroke();
         });
         // measured curve
-        if (curve.length > 1) {
+        const pts = o.curve || [];
+        if (pts.length > 1) {
             let lo = Infinity, hi = -Infinity;
-            curve.forEach((p) => { if (p.db < lo) lo = p.db; if (p.db > hi) hi = p.db; });
+            pts.forEach((p) => { if (p.db < lo) lo = p.db; if (p.db > hi) hi = p.db; });
             lo = Math.max(lo, hi - 60);
             if (hi - lo < 10) lo = hi - 10;
             const y = (db) => padT + (Hd - padT - padB) * (1 - (Math.max(db, lo) - lo) / (hi - lo));
@@ -700,19 +716,368 @@
             g.strokeStyle = '#d4af37'; g.lineWidth = 2; g.lineJoin = 'round';
             g.beginPath();
             let started = false;
-            curve.forEach((p) => {
+            pts.forEach((p) => {
                 if (p.f < f1 || p.f > f2) return;
                 if (!started) { g.moveTo(x(p.f), y(p.db)); started = true; } else g.lineTo(x(p.f), y(p.db));
             });
             g.stroke();
         }
-        // cursor: sweep position or the playing tone
-        const cf = cursorF != null ? cursorF : (voice && voice.kind === 'tone' ? voice.f1 : null);
-        if (cf != null && cf >= f1 && cf <= f2) {
+        if (o.cursor != null && o.cursor >= f1 && o.cursor <= f2) {
             g.strokeStyle = '#fff'; g.lineWidth = 1; g.setLineDash([4, 4]);
-            g.beginPath(); g.moveTo(x(cf), padT); g.lineTo(x(cf), Hd - padB); g.stroke();
+            g.beginPath(); g.moveTo(x(o.cursor), padT); g.lineTo(x(o.cursor), Hd - padB); g.stroke();
             g.setLineDash([]);
         }
+    }
+
+    const recCurve = (rec) => rec.curve.map((p) => ({ f: p[0], db: p[1] }));
+    function recTitle(rec) {
+        const p = R.localParts(rec);
+        return p.date + ' ' + p.time + (rec.note ? ' · ' + rec.note : '');
+    }
+
+    function drawChart(cursorF) {
+        const cv = $('chart');
+        const dpr = window.devicePixelRatio || 1;
+        const Wd = cv.clientWidth || 320, Hd = cv.clientHeight || 220;
+        if (cv.width !== Math.round(Wd * dpr) || cv.height !== Math.round(Hd * dpr)) {
+            cv.width = Math.round(Wd * dpr);
+            cv.height = Math.round(Hd * dpr);
+        }
+        cv.dataset.points = String(curve.length);   // for tests
+        const g = cv.getContext('2d');
+        g.setTransform(dpr, 0, 0, dpr, 0, 0);
+        if (viewing) {
+            $('chartTitle').textContent = 'Saved: ' + recTitle(viewing);
+            paintChart(g, Wd, Hd, { f1: viewing.fMin, f2: viewing.fMax, curve: recCurve(viewing), marks: [], cursor: null });
+        } else {
+            $('chartTitle').textContent = curveKind === 'clap' ? 'Measurement: clap spectrum' : curveKind === 'sweep' ? 'Measurement: sweep' : 'Measurement';
+            // cursor: sweep position or the playing tone
+            const cf = cursorF != null ? cursorF : (voice && voice.kind === 'tone' ? voice.f1 : null);
+            paintChart(g, Wd, Hd, { f1: settings.fMin, f2: settings.fMax, curve, marks: shown, cursor: cf });
+        }
+        // the save box follows the chart: only a finished, live measurement can be saved
+        const can = !viewing && (curveState === 'done' || curveState === 'saved') && !recording && !clapBusy;
+        $('saveBox').hidden = !can;
+        $('saveBtn').disabled = curveState === 'saved';
+        $('saveBtn').textContent = curveState === 'saved' ? 'Saved' : 'Save this measurement';
+    }
+
+    // ---------- Saved measurements ----------
+    // Records live in IndexedDB ("records"), photos beside them ("photos", keyed by record id).
+    let db = null;
+    let saved = [];                 // newest first
+    const thumbs = new Map();       // record id -> object URL of its photo
+    const prepared = new Map();     // record id or 'all' -> { files, title, text } ready for the share sheet
+    let photoTarget = null;
+
+    function openDb() {
+        return new Promise((resolve, reject) => {
+            if (!window.indexedDB) { reject(new Error('This browser has no storage for saved measurements.')); return; }
+            const rq = indexedDB.open('pyramid-res', 1);
+            rq.onupgradeneeded = () => {
+                const d = rq.result;
+                if (!d.objectStoreNames.contains('records')) d.createObjectStore('records', { keyPath: 'id' });
+                if (!d.objectStoreNames.contains('photos')) d.createObjectStore('photos');
+            };
+            rq.onsuccess = () => resolve(rq.result);
+            rq.onerror = () => reject(rq.error || new Error('Storage could not be opened.'));
+            rq.onblocked = () => reject(new Error('Storage is busy in another tab.'));
+        });
+    }
+    // One transaction; resolves with the request's result once the data is safely written
+    function tx(stores, mode, work) {
+        return new Promise((resolve, reject) => {
+            if (!db) { reject(new Error('Storage is not available.')); return; }
+            let out;
+            const t = db.transaction(stores, mode);
+            const rq = work(t);
+            if (rq) rq.onsuccess = () => { out = rq.result; };
+            t.oncomplete = () => resolve(out);
+            t.onerror = t.onabort = () => reject(t.error || new Error('Storage error.'));
+        });
+    }
+    const putRecord = (rec) => { prepared.delete(rec.id); prepared.delete('all'); return tx('records', 'readwrite', (t) => t.objectStore('records').put(rec)); };
+    const savedMsg = (text) => { $('savedMsg').textContent = text || ''; };
+
+    function locationLine(rec) {
+        if (rec.location) return R.formatLocation(rec.location) + (rec.locationStatus === 'pending' ? ' (improving…)' : '');
+        return { pending: 'Getting location…', denied: 'No location: not allowed for this page.', unavailable: 'No location: the phone could not find one.', off: 'No location.' }[rec.locationStatus] || 'No location.';
+    }
+
+    function renderSaved() {
+        const host = $('savedList');
+        host.textContent = '';
+        $('savedEmpty').hidden = saved.length > 0;
+        $('shareAll').hidden = saved.length < 2;
+        const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
+        saved.forEach((rec) => {
+            const box = el('div', null, 'rec');
+            box.dataset.id = rec.id;
+            box.appendChild(el('b', recTitle(rec)));
+            box.appendChild(el('p', (rec.kind === 'sweep' ? 'Sweep' : 'Clap') + ' ' + rec.fMin + '–' + rec.fMax + ' Hz · ' + R.peakSummary(rec, 4), 'hint'));
+            const loc = el('p', locationLine(rec) + ' ', 'hint');
+            loc.dataset.role = 'location';
+            if (rec.location) { const a = el('a', 'map'); a.href = R.mapsUrl(rec.location); a.target = '_blank'; a.rel = 'noopener'; loc.appendChild(a); }
+            box.appendChild(loc);
+            if (rec.photo) {
+                const img = document.createElement('img');
+                img.alt = 'Photo for this measurement';
+                if (thumbs.has(rec.id)) img.src = thumbs.get(rec.id);
+                else loadThumb(rec.id, img);
+                box.appendChild(img);
+            }
+            const row = el('div', null, 'row mt');
+            const button = (label, role, handler) => { const b = el('button', label, 'ghost'); b.type = 'button'; b.dataset.role = role; b.addEventListener('click', () => handler(rec, b)); row.appendChild(b); };
+            button('Show', 'show', showRecord);
+            button(rec.photo ? 'New photo' : 'Add photo', 'photo', pickPhoto);
+            button(prepared.has(rec.id) ? 'Tap to send' : 'Send', 'share', shareRecord);
+            button('Delete', 'delete', deleteRecord);
+            box.appendChild(row);
+            host.appendChild(box);
+        });
+    }
+
+    async function loadThumb(id, img) {
+        try {
+            const p = await tx('photos', 'readonly', (t) => t.objectStore('photos').get(id));
+            if (!p) return;
+            const url = URL.createObjectURL(new Blob([p.buffer], { type: p.type }));
+            thumbs.set(id, url);
+            if (img.isConnected) img.src = url;
+        } catch (e) { /* the list still works without the picture */ }
+    }
+
+    // Started straight from the Save tap. Keeps the best fix of the first 15 s, or stops early at 10 m.
+    function startLocate(rec) {
+        if (!navigator.geolocation) { rec.locationStatus = 'unavailable'; return; }
+        let done = false, watch = null, timer = null;
+        const finish = (status) => {
+            if (done) return;
+            done = true;
+            if (watch != null) navigator.geolocation.clearWatch(watch);
+            clearTimeout(timer);
+            rec.locationStatus = rec.location ? 'ok' : status;
+            if (saved.includes(rec)) putRecord(rec).catch(() => {}).then(renderSaved);
+        };
+        try {
+            watch = navigator.geolocation.watchPosition((pos) => {
+                if (done) return;
+                const c = pos.coords;
+                rec.location = R.betterFix(rec.location, {
+                    lat: c.latitude, lon: c.longitude, accuracyM: c.accuracy,
+                    altitudeM: c.altitude, altitudeAccuracyM: c.altitudeAccuracy, time: new Date(pos.timestamp).toISOString(),
+                });
+                if (rec.location && rec.location.accuracyM != null && rec.location.accuracyM <= 10) finish('ok');
+                else if (saved.includes(rec)) putRecord(rec).catch(() => {}).then(renderSaved);
+            }, (err) => {
+                // code 1 = refused. Other errors may be followed by a fix, so only the timer ends those.
+                if (err && err.code === 1) finish('denied');
+            }, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
+        } catch (e) { finish('unavailable'); return; }
+        timer = setTimeout(() => finish('unavailable'), 15000);
+    }
+
+    async function saveMeasurement() {
+        if (curveState !== 'done' || viewing) return;
+        if (!db) { $('saveMsg').textContent = 'Saving is not available in this browser (private browsing blocks it).'; return; }
+        const d = roomDims();
+        const rec = R.makeRecord({
+            time: new Date(), kind: curveKind, note: $('saveNote').value,
+            room: { name: settings.room, lengthM: d.L, widthM: d.W, heightM: d.H },
+            tempC: settings.temp, fMin: settings.fMin, fMax: settings.fMax,
+            sweepDurS: settings.sweepDur, speaker: settings.speaker,
+            curve, peaks: lastPeaks, app: BUILD, locationStatus: 'pending',
+        });
+        curveState = 'saved';
+        drawChart();
+        startLocate(rec);       // before any await: a permission prompt needs the tap
+        try {
+            await putRecord(rec);
+        } catch (e) {
+            curveState = 'done';
+            drawChart();
+            $('saveMsg').textContent = 'Could not save: ' + (e && e.message ? e.message : 'storage error') + '.';
+            return;
+        }
+        saved.unshift(rec);
+        $('saveMsg').textContent = 'Saved. It is in the list below, where you can add a photo or send it.';
+        $('saveNote').value = '';
+        renderSaved();
+        // ask the browser not to clear this data when the phone runs low on space
+        try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch (e) { /* ignore */ }
+    }
+
+    function showRecord(rec) {
+        if (voice || clapBusy) stopAll();
+        viewing = rec;
+        const host = $('peaks');
+        host.textContent = '';
+        const note = (text) => { const p = document.createElement('p'); p.className = 'hint'; p.textContent = text; host.appendChild(p); };
+        if (rec.peaks.length) {
+            const table = document.createElement('table');
+            const head = document.createElement('tr');
+            ['Measured', 'Note', 'Nearest listed mode', 'Miss'].forEach((h) => { const th = document.createElement('th'); th.textContent = h; head.appendChild(th); });
+            table.appendChild(head);
+            rec.peaks.forEach((p) => {
+                const tr = document.createElement('tr');
+                [p.f.toFixed(1) + ' Hz' + (p.edge ? ' (edge)' : '') + (p.echo ? ' (old tone?)' : ''), noteText(p.f), p.nearest || '–', p.miss || '–']
+                    .forEach((c) => { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); });
+                table.appendChild(tr);
+            });
+            host.appendChild(table);
+        } else note('No clear peaks in this measurement.');
+        note('This is a saved measurement' + (rec.location ? ' from ' + R.formatLocation(rec.location) : '') + '. A new clap or sweep replaces it on screen; the saved copy stays in the list.');
+        drawChart();
+        if ($('chartTitle').scrollIntoView) $('chartTitle').scrollIntoView({ block: 'start', behavior: 'smooth' });
+    }
+
+    function pickPhoto(rec) {
+        photoTarget = rec;
+        const input = $('photoInput');
+        input.value = '';
+        input.click();      // iOS offers "Take Photo" and "Photo Library"
+    }
+    async function photoChosen() {
+        const rec = photoTarget, file = $('photoInput').files && $('photoInput').files[0];
+        photoTarget = null;
+        if (!rec || !file || !saved.includes(rec)) return;
+        savedMsg('');
+        const url = URL.createObjectURL(file);
+        try {
+            const img = new Image();
+            img.src = url;
+            await img.decode();
+            const size = R.fitSize(img.naturalWidth, img.naturalHeight, 1600);
+            const cv = document.createElement('canvas');
+            cv.width = size.width; cv.height = size.height;
+            cv.getContext('2d').drawImage(img, 0, 0, size.width, size.height);
+            const blob = await new Promise((resolve) => cv.toBlob(resolve, 'image/jpeg', 0.85));
+            if (!blob) throw new Error('the picture could not be converted');
+            const buffer = await blob.arrayBuffer();
+            const info = { name: file.name || '', type: 'image/jpeg', width: size.width, height: size.height,
+                takenTime: file.lastModified ? new Date(file.lastModified).toISOString() : null };
+            const next = Object.assign({}, rec, { photo: info });
+            await tx(['records', 'photos'], 'readwrite', (t) => { t.objectStore('photos').put({ type: 'image/jpeg', buffer }, rec.id); return t.objectStore('records').put(next); });
+            rec.photo = info;
+            prepared.delete(rec.id);
+            if (thumbs.has(rec.id)) { URL.revokeObjectURL(thumbs.get(rec.id)); thumbs.delete(rec.id); }
+        } catch (e) {
+            savedMsg('The photo could not be added: ' + (e && e.message ? e.message : 'unknown error') + '.');
+        } finally {
+            URL.revokeObjectURL(url);
+        }
+        renderSaved();
+    }
+
+    function chartPng(rec) {
+        const W = 640, H = 300, scale = 2;
+        const cv = document.createElement('canvas');
+        cv.width = W * scale; cv.height = H * scale;
+        const g = cv.getContext('2d');
+        g.setTransform(scale, 0, 0, scale, 0, 0);
+        g.fillStyle = '#0b0b0b'; g.fillRect(0, 0, W, H);
+        g.setTransform(scale, 0, 0, scale, 0, 44 * scale);
+        paintChart(g, W, H - 44, { f1: rec.fMin, f2: rec.fMax, curve: recCurve(rec), marks: [], cursor: null });
+        g.setTransform(scale, 0, 0, scale, 0, 0);
+        g.fillStyle = '#fff'; g.font = 'bold 13px system-ui, sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle';
+        g.fillText(recTitle(rec).slice(0, 80), 10, 14);
+        g.fillStyle = '#a8a8a8'; g.font = '11px system-ui, sans-serif';
+        g.fillText('Peaks: ' + R.peakSummary(rec, 6) + (rec.location ? '   ·   ' + R.formatLocation(rec.location) : ''), 10, 32);
+        return new Promise((resolve) => cv.toBlob(resolve, 'image/png'));
+    }
+
+    async function prepareRecord(rec) {
+        const base = R.fileBase(rec);
+        const files = [new File([JSON.stringify(rec, null, 1)], base + '.json', { type: 'application/json' })];
+        const png = await chartPng(rec);
+        if (png) files.push(new File([png], base + '-chart.png', { type: 'image/png' }));
+        if (rec.photo) {
+            const p = await tx('photos', 'readonly', (t) => t.objectStore('photos').get(rec.id));
+            if (p) files.push(new File([p.buffer], base + '-photo.jpg', { type: 'image/jpeg' }));
+        }
+        return { files, title: 'Resonance measurement', text: R.shareText(rec) };
+    }
+    function prepareAll() {
+        const day = new Date().toISOString().slice(0, 10);
+        const body = JSON.stringify(R.exportAll(saved.slice().reverse(), BUILD), null, 1);
+        return { files: [new File([body], 'resonance-all-' + day + '.json', { type: 'application/json' })],
+            title: 'Resonance measurements', text: saved.length + ' resonance measurements. Photos are not in this file: send those one measurement at a time.' };
+    }
+
+    function download(files) {
+        files.forEach((f, i) => setTimeout(() => {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(f); a.download = f.name;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+        }, i * 400));
+    }
+
+    // The share sheet only opens straight from a tap. Building the files takes a moment, so if
+    // the phone refuses the first try, the files are kept and the button asks for one more tap.
+    async function send(key, build, button, idleLabel) {
+        savedMsg('');
+        let pack = prepared.get(key);
+        if (!pack) {
+            button.disabled = true;
+            try { pack = await build(); } catch (e) { savedMsg('Could not build the files: ' + (e && e.message ? e.message : 'unknown error') + '.'); button.disabled = false; return; }
+            button.disabled = false;
+        }
+        const canShare = (files) => { try { return !!(navigator.share && navigator.canShare && navigator.canShare({ files })); } catch (e) { return false; } };
+        let shareable = canShare(pack.files);
+        if (!shareable && navigator.share) {
+            // some phones refuse .json in the share sheet: offer the same text as a .txt file
+            const asText = pack.files.map((f) => (f.type === 'application/json' ? new File([f], f.name + '.txt', { type: 'text/plain' }) : f));
+            if (canShare(asText)) { pack = Object.assign({}, pack, { files: asText }); shareable = true; }
+        }
+        if (!shareable) {
+            download(pack.files);
+            savedMsg('This browser cannot open a share sheet for files, so they were downloaded instead.');
+            return;
+        }
+        try {
+            await navigator.share({ files: pack.files, title: pack.title, text: pack.text });
+            prepared.delete(key);
+            button.textContent = idleLabel;
+        } catch (e) {
+            if (e && e.name === 'AbortError') { prepared.delete(key); button.textContent = idleLabel; return; }   // closed the sheet
+            prepared.set(key, pack);
+            button.textContent = 'Tap to send';
+        }
+    }
+    const shareRecord = (rec, button) => send(rec.id, () => prepareRecord(rec), button, 'Send');
+
+    function deleteRecord(rec, button) {
+        if (button.dataset.armed !== '1') {
+            button.dataset.armed = '1';
+            button.textContent = 'Really delete?';
+            setTimeout(() => { if (button.isConnected) { button.dataset.armed = ''; button.textContent = 'Delete'; } }, 4000);
+            return;
+        }
+        tx(['records', 'photos'], 'readwrite', (t) => { t.objectStore('photos').delete(rec.id); return t.objectStore('records').delete(rec.id); })
+            .then(() => {
+                saved = saved.filter((r) => r !== rec);
+                prepared.delete(rec.id); prepared.delete('all');
+                if (thumbs.has(rec.id)) { URL.revokeObjectURL(thumbs.get(rec.id)); thumbs.delete(rec.id); }
+                if (viewing === rec) { viewing = null; $('peaks').textContent = ''; drawChart(); }
+                renderSaved();
+            })
+            .catch((e) => savedMsg('Could not delete: ' + (e && e.message ? e.message : 'storage error') + '.'));
+    }
+
+    async function loadSaved() {
+        try {
+            db = await openDb();
+            db.onversionchange = () => { db.close(); db = null; };
+            const all = await tx('records', 'readonly', (t) => t.objectStore('records').getAll());
+            saved = (all || []).sort((a, b) => (a.time < b.time ? 1 : -1));
+            // a location search cut short by closing the app will never finish
+            saved.forEach((r) => { if (r.locationStatus === 'pending') r.locationStatus = r.location ? 'ok' : 'unavailable'; });
+        } catch (e) {
+            db = null;
+            savedMsg('Saved measurements are not available here: ' + (e && e.message ? e.message : 'no storage') + '.');
+        }
+        renderSaved();
     }
 
     // ---------- Wiring ----------
@@ -722,7 +1087,7 @@
         mutate();
         sanitize(settings);
         if (voice || clapBusy) stopAll();
-        curve = []; curveKind = ''; recording = false; $('peaks').textContent = '';
+        curve = []; curveKind = ''; curveState = 'none'; viewing = null; recording = false; $('peaks').textContent = '';
         if (!recompute()) {
             const message = $('roomWarn').textContent;
             Object.assign(settings, before);
@@ -759,6 +1124,9 @@
     $('sweep').addEventListener('click', toggleSweep);
     $('mic').addEventListener('click', toggleMic);
     $('clap').addEventListener('click', recordClap);
+    $('saveBtn').addEventListener('click', saveMeasurement);
+    $('photoInput').addEventListener('change', photoChosen);
+    $('shareAll').addEventListener('click', () => send('all', async () => prepareAll(), $('shareAll'), 'Send all as one file'));
 
     // A hidden page cannot be trusted to keep playing: stop, so the screen never lies
     document.addEventListener('visibilitychange', () => {
@@ -776,4 +1144,5 @@
         syncInputs(); recompute(); save();
     }
     setClapButton();
+    loadSaved();
 })();
