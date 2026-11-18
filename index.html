@@ -100,6 +100,14 @@
         table { width: 100%; border-collapse: collapse; font-size: .9rem; font-variant-numeric: tabular-nums; margin-top: 8px; }
         th, td { text-align: left; padding: 5px 4px; border-bottom: 1px solid var(--line); }
         th { color: var(--muted); font-weight: 400; }
+        input[type=text] { padding: 10px; font-size: 1rem; background: #222; color: #fff; border: 1px solid var(--gold-dim); border-radius: 8px; width: 100%; min-height: 44px; }
+        .rec { border-top: 1px solid var(--line); padding: 10px 0; }
+        .rec b { font-variant-numeric: tabular-nums; }
+        .rec p { margin: 4px 0 0; }
+        .rec a { color: var(--gold); }
+        .rec img { display: block; max-width: 100%; max-height: 180px; border-radius: 8px; margin-top: 8px; }
+        .rec .row > button { padding: 8px 6px; font-size: .9rem; min-width: 0; }
+        [hidden] { display: none !important; }
     </style>
 </head>
 
@@ -207,12 +215,30 @@
             <canvas id="chart" role="img" aria-label="Measured level against frequency with predicted room modes"></canvas>
             <p class="hint" id="chartHint">Run a sweep or record a clap with the microphone on. Gold line: measured level. Ticks along the top: the predicted modes listed above (long ticks are axial).</p>
             <div id="peaks"></div>
+            <div id="saveBox" hidden>
+                <label class="mt">Place or note (optional)
+                    <input type="text" id="saveNote" maxlength="120" autocomplete="off" placeholder="e.g. stairwell, 2nd floor">
+                </label>
+                <div class="row mt"><button id="saveBtn">Save this measurement</button></div>
+                <p class="hint" id="saveMsg"></p>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Saved measurements</h2>
+            <div id="savedList"></div>
+            <p class="hint" id="savedEmpty">Nothing saved yet. After a clap or a measured sweep, "Save this measurement" stores the spectrum here with the time and your location. You can add a photo and send it by mail or to another app.</p>
+            <div class="row mt"><button id="shareAll" class="ghost" hidden>Send all as one file</button></div>
+            <p class="hint">Saved on this phone only, until you send them. The location needs "Precise Location" allowed for this page. Photos are kept inside the app (reduced in size) and travel with the measurement when you send it; a web page cannot write to the phone's photo gallery itself.</p>
+            <p class="warn" id="savedMsg"></p>
+            <input type="file" id="photoInput" accept="image/*" hidden>
         </div>
 
         <p class="hint">Model: rigid rectangular room. Real rooms have openings, sloped ceilings and people in them, so expect measured peaks within a few percent of the prediction, not on it. The curve also contains your speaker's and microphone's own response.</p>
         <p class="hint" id="build"></p>
     </main>
     <script src="modes.js"></script>
+    <script src="records.js"></script>
     <script src="app.js"></script>
 </body>
 

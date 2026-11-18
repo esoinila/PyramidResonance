@@ -29,6 +29,14 @@ Version 1 played thirty frequencies between 16 and 88 Hz at once. Small Bluetoot
 - On iPhones, turning the microphone on can make the tone quieter or move it to the earpiece. If that happens, turn the microphone off and judge by ear, or use the clap test.
 - The measured curve includes the speaker's and the microphone's own frequency response. Peaks are judged against the local trend for that reason.
 
+### Saving measurements
+After a clap or a measured sweep, "Save this measurement" stores the spectrum on the phone with the time, an optional note and the location (the best fix of the first 15 seconds, with its accuracy). Each saved measurement can be shown again, given a photo, sent, or deleted.
+
+- **Photo**: taken or picked through the phone's own chooser and kept inside the app at 1600 px. A web page cannot write to the photo gallery; the photo travels with the measurement when it is sent.
+- **Send**: opens the share sheet with three files: the data (`.json`), the chart (`.png`) and the photo (`.jpg`). Mail, Files, AirDrop or any other app can take them. "Send all as one file" gives one `.json` with every measurement, without photos.
+- **Data format**: `schema: pyramid-resonance-measurement/1`, with `time` (UTC) and `tzOffsetMin`, `location` (`lat`, `lon`, `accuracyM`, `altitudeM`), `fMin`/`fMax`, `peaks` and `curve` as `[Hz, dB]` pairs. The dB values are relative, not calibrated.
+- The location needs "Precise Location" allowed for the page. Without it the measurement is still saved.
+
 ### Versions and updates
 The page shows its version at the bottom. The app keeps a complete copy of itself on the phone and runs from that copy, so it opens with no signal. When the phone is online and a newer version exists, the whole new set is downloaded together and the page reloads itself (or shows a "Load the new version" button if something is playing). A release needs the same new number in `BUILD` in `app.js` and `VERSION` in `sw.js`; a test checks that they match.
 
@@ -62,6 +70,7 @@ Axial modes of the King's Chamber, 60–250 Hz at 20 °C:
 
 - `index.html`, `app.js`: the interface, audio and measurement
 - `modes.js`: the maths, shared by the browser and the tests
+- `records.js`: the saved-measurement format, shared by the browser and the tests
 - `sw.js`, `manifest.json`, `icon.svg`: offline support and home-screen install
 - `calculate_resonance.py`: the same calculation in Python, for checking by hand
 - `test/modes.test.js`: unit tests, run with `node --test test/*.js`

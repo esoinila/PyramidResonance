@@ -211,3 +211,74 @@ test('app.js BUILD and sw.js VERSION are the same, and every cached file exists'
   const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   for (const m of app.matchAll(/\$\('([A-Za-z]+)'\)/g)) assert.ok(html.includes('id="' + m[1] + '"'), 'missing id ' + m[1]);
 });
+
+// ---------- saved measurements (records.js) ----------
+const Rec = require('../records.js');
+
+test('makeRecord keeps the spectrum, rounds it, and survives a JSON round trip', () => {
+  const rec = Rec.makeRecord({
+    time: new Date('2027-03-10T15:04:05Z'), tzOffsetMin: -300, kind: 'clap', note: '  Sacsayhuamán, niche 3  ',
+    fMin: 60, fMax: 250, tempC: 12, sweepDurS: 60, speaker: 'bt',
+    curve: [{ f: 100.004, db: -40.26 }, { f: 101.5, db: NaN }, { f: 102.46, db: -38.04 }],
+    peaks: [{ f: 117.123, db: -30.56, prominence: 9.44, edge: false, echo: true, nearest: '117.3 Hz height ×4', miss: '-0.2 %' }, { f: 80, db: -50, prominence: 6, miss: '–' }],
+    app: '2.1.0',
+  });
+  assert.strictEqual(rec.schema, Rec.SCHEMA);
+  assert.deepStrictEqual(rec.curve, [[100, -40.3], [102.46, -38]]);
+  assert.deepStrictEqual(rec.peaks[0], { f: 117.12, db: -30.6, prominenceDb: 9.4, echo: true, nearest: '117.3 Hz height ×4', miss: '-0.2 %' });
+  assert.strictEqual(rec.peaks[1].miss, undefined);
+  assert.strictEqual(rec.note, 'Sacsayhuamán, niche 3');
+  assert.strictEqual(rec.sweepDurS, null, 'sweep settings are not recorded for a clap');
+  assert.strictEqual(rec.location, null);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(rec)), rec);
+  assert.ok(rec.id.startsWith('20270310150405'));
+  assert.notStrictEqual(Rec.makeRecord({ time: new Date('2027-03-10T15:04:05Z') }).id, rec.id, 'ids are unique');
+});
+
+test('local time and file names follow the place where it was measured', () => {
+  const rec = Rec.makeRecord({ time: new Date('2027-03-10T03:04:05Z'), tzOffsetMin: -300, note: 'Sacsayhuamán, niche 3!' });
+  assert.deepStrictEqual(Rec.localParts(rec), { date: '2027-03-09', time: '22:04', compact: '220405' });
+  assert.strictEqual(Rec.fileBase(rec), 'resonance-2027-03-09-220405-sacsayhuaman-niche-3');
+  assert.strictEqual(Rec.fileBase(Rec.makeRecord({ time: new Date('2027-03-10T03:04:05Z'), tzOffsetMin: 120 })), 'resonance-2027-03-10-050405');
+  assert.ok(!/[^a-z0-9-]/.test(Rec.fileBase(Rec.makeRecord({ note: '../../etc/passwd <b>äö</b> 🤠' }))));
+});
+
+test('locations: cleaned, formatted, and the more accurate fix wins', () => {
+  assert.strictEqual(Rec.cleanLocation(null), null);
+  assert.strictEqual(Rec.cleanLocation({ lat: 91, lon: 0 }), null);
+  assert.strictEqual(Rec.cleanLocation({ lat: NaN, lon: 0 }), null);
+  const a = { lat: 60.2784012345, lon: 24.8501298765, accuracyM: 35.26, altitudeM: null };
+  const b = { lat: 60.27841, lon: 24.85014, accuracyM: 6.4, altitudeM: 41.26 };
+  assert.deepStrictEqual(Rec.cleanLocation(a), { lat: 60.278401, lon: 24.85013, accuracyM: 35.3, altitudeM: null, altitudeAccuracyM: null, time: null });
+  assert.strictEqual(Rec.betterFix(a, b).accuracyM, 6.4);
+  assert.strictEqual(Rec.betterFix(b, a).accuracyM, 6.4);
+  assert.strictEqual(Rec.betterFix(null, a).accuracyM, 35.3);
+  assert.strictEqual(Rec.betterFix(a, null).accuracyM, 35.3);
+  assert.strictEqual(Rec.betterFix(null, null), null);
+  assert.strictEqual(Rec.formatLocation(b), '60.27841, 24.85014 ±6 m, 41 m above sea level');
+  assert.strictEqual(Rec.formatLocation(null), '');
+  assert.strictEqual(Rec.mapsUrl(b), 'https://maps.google.com/?q=60.27841,24.85014');
+  assert.strictEqual(Rec.mapsUrl({ lat: -13.5098, lon: -71.9817 }), 'https://maps.google.com/?q=-13.5098,-71.9817');
+});
+
+test('summaries, share text and the all-in-one export', () => {
+  const rec = Rec.makeRecord({ time: new Date('2026-11-18T19:08:00Z'), tzOffsetMin: 120, kind: 'sweep', note: 'stairwell', fMin: 60, fMax: 250, sweepDurS: 60, speaker: 'bt',
+    peaks: [{ f: 200, prominence: 5 }, { f: 117.1, prominence: 12 }, { f: 90, prominence: 4 }, { f: 150, prominence: 8 }, { f: 70, prominence: 3 }] });
+  assert.strictEqual(Rec.peakSummary(rec, 3), '117.1, 150.0, 200.0 Hz');
+  assert.strictEqual(Rec.peakSummary(Rec.makeRecord({}), 3), 'no clear peaks');
+  assert.strictEqual(rec.sweepDurS, 60);
+  const text = Rec.shareText(rec);
+  assert.ok(text.includes('2026-11-18 21:08') && text.includes('stairwell') && text.includes('60–250 Hz') && !text.includes('Location'));
+  rec.location = Rec.cleanLocation({ lat: 60.27841, lon: 24.85014, accuracyM: 6 });
+  assert.ok(Rec.shareText(rec).includes('Location: 60.27841, 24.85014 ±6 m'));
+  const all = Rec.exportAll([rec, rec], '2.1.0');
+  assert.strictEqual(all.count, 2);
+  assert.strictEqual(JSON.parse(JSON.stringify(all)).measurements[1].note, 'stairwell');
+});
+
+test('fitSize shrinks a photo to 1600 on its long side and never enlarges', () => {
+  assert.deepStrictEqual(Rec.fitSize(4032, 3024, 1600), { width: 1600, height: 1200 });
+  assert.deepStrictEqual(Rec.fitSize(3024, 4032, 1600), { width: 1200, height: 1600 });
+  assert.deepStrictEqual(Rec.fitSize(800, 600, 1600), { width: 800, height: 600 });
+  assert.deepStrictEqual(Rec.fitSize(0, 600, 1600), { width: 0, height: 0 });
+});
