@@ -24,6 +24,8 @@ Version 1 played thirty frequencies between 16 and 88 Hz at once. Small Bluetoot
 ### Microphone notes
 
 - The microphone needs https and your permission. Nothing is recorded or uploaded; the audio is analysed on the phone and discarded.
+- Sweep readings are shifted back by the analyser window and the speaker delay. Set "Sound comes from" to Bluetooth or Phone/cable so the right delay is used; a Bluetooth speaker's exact delay is unknown, so sweep peaks are good to a fraction of a percent, not better. The clap has no such error.
+- Not yet tested on a real iPhone: whether the tone stays on a Bluetooth speaker while the microphone is on.
 - On iPhones, turning the microphone on can make the tone quieter or move it to the earpiece. If that happens, turn the microphone off and judge by ear, or use the clap test.
 - The measured curve includes the speaker's and the microphone's own frequency response. Peaks are judged against the local trend for that reason.
 
@@ -57,6 +59,7 @@ Axial modes of the King's Chamber, 60–250 Hz at 20 °C:
 - `sw.js`, `manifest.json`, `icon.svg`: offline support and home-screen install
 - `calculate_resonance.py`: the same calculation in Python, for checking by hand
 - `test/modes.test.js`: unit tests, run with `node --test test/*.js`
+- `test/smoke.py`: browser test of the whole app with a simulated room and microphone, run with `python3 test/smoke.py` (needs Playwright and Chrome)
 
 ## Sources
 

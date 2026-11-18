@@ -46,21 +46,24 @@
   /*
    * All modes with fMin <= f <= fMax, sorted by frequency.
    * Each: { f, nx, ny, nz, type, label }.
-   * The index limits are derived from fMax, so no mode in range is missed.
+   * The index limits are derived from fMax with one spare index per axis, and the
+   * upper bound has a tiny tolerance, so a mode sitting exactly on fMax is kept.
+   * Call estimateModeCount first: the count grows with the cube of fMax.
    */
   function roomModes(L, W, H, c, fMin, fMax) {
     if (!(L > 0 && W > 0 && H > 0 && c > 0) || !(fMax > 0)) return [];
     const lo = Math.max(0, fMin || 0);
     const out = [];
-    const maxX = Math.floor(2 * L * fMax / c);
-    const maxY = Math.floor(2 * W * fMax / c);
-    const maxZ = Math.floor(2 * H * fMax / c);
+    const hi = fMax * (1 + 1e-9);
+    const maxX = Math.floor(2 * L * fMax / c) + 1;
+    const maxY = Math.floor(2 * W * fMax / c) + 1;
+    const maxZ = Math.floor(2 * H * fMax / c) + 1;
     for (let nx = 0; nx <= maxX; nx++) {
       for (let ny = 0; ny <= maxY; ny++) {
         for (let nz = 0; nz <= maxZ; nz++) {
           if (nx === 0 && ny === 0 && nz === 0) continue;
           const f = (c / 2) * Math.sqrt((nx / L) ** 2 + (ny / W) ** 2 + (nz / H) ** 2);
-          if (f >= lo && f <= fMax) {
+          if (f >= lo && f <= hi) {
             out.push({ f, nx, ny, nz, type: modeType(nx, ny, nz), label: '(' + nx + ',' + ny + ',' + nz + ')' });
           }
         }
@@ -68,6 +71,19 @@
     }
     out.sort((a, b) => a.f - b.f || a.nx - b.nx || a.ny - b.ny || a.nz - b.nz);
     return out;
+  }
+
+  // Approximate number of modes below f (the standard volume + surface + edge formula)
+  function modesBelow(L, W, H, c, f) {
+    if (!(f > 0)) return 0;
+    const k = f / c;
+    const V = L * W * H, S = 2 * (L * W + L * H + W * H), E = 4 * (L + W + H);
+    return (4 * Math.PI / 3) * V * k * k * k + (Math.PI / 4) * S * k * k + (E / 8) * k;
+  }
+  // Cheap estimate of how many modes roomModes would return, for refusing huge ranges
+  function estimateModeCount(L, W, H, c, fMin, fMax) {
+    if (!(L > 0 && W > 0 && H > 0 && c > 0) || !(fMax > 0)) return 0;
+    return Math.max(0, modesBelow(L, W, H, c, fMax) - modesBelow(L, W, H, c, Math.max(0, fMin || 0)));
   }
 
   const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -94,11 +110,15 @@
   function findPeaks(points, minProminence, window) {
     const prom = minProminence == null ? 4 : minProminence;
     const w = window == null ? 12 : window;
+    const n = points.length;
     const peaks = [];
-    for (let i = 1; i < points.length - 1; i++) {
+    for (let i = 0; i < n; i++) {
       const p = points[i];
-      if (!(p.db > points[i - 1].db && p.db >= points[i + 1].db)) continue;
-      const a = Math.max(0, i - w), b = Math.min(points.length, i + w + 1);
+      // a local maximum; the first and last points count if they top their one neighbour
+      const left = i === 0 ? -Infinity : points[i - 1].db;
+      const right = i === n - 1 ? -Infinity : points[i + 1].db;
+      if (n < 3 || !(p.db > left && p.db >= right)) continue;
+      const a = Math.max(0, i - w), b = Math.min(n, i + w + 1);
       const near = [];
       for (let k = a; k < b; k++) near.push(points[k].db);
       near.sort((x, y) => x - y);
@@ -114,6 +134,11 @@
     return kept.sort((x, y) => x.f - y.f);
   }
 
+  // The `count` most prominent peaks, returned in frequency order
+  function strongestPeaks(peaks, count) {
+    return peaks.slice().sort((x, y) => y.prominence - x.prominence).slice(0, count).sort((x, y) => x.f - y.f);
+  }
+
   // Predicted mode nearest to a measured frequency, with the miss in percent
   function nearestMode(modes, f) {
     let best = null;
@@ -123,5 +148,54 @@
     return best ? { mode: best, errorPct: 100 * (f - best.f) / best.f } : null;
   }
 
-  return { ROOMS, speedOfSound, roomModes, modeType, noteName, sweepFreq, findPeaks, nearestMode };
+  /*
+   * Honest matching of a measured peak to predicted modes.
+   * Returns { mode, errorPct, candidates } where candidates is how many predicted
+   * modes lie within tolPct of the measurement. mode is null when none do.
+   * With many candidates a "match" means nothing, and the caller should say so.
+   */
+  function matchMode(modes, f, tolPct) {
+    const tol = tolPct == null ? 3 : tolPct;
+    let candidates = 0;
+    for (const m of modes) if (Math.abs(m.f - f) / m.f * 100 <= tol) candidates++;
+    const near = nearestMode(modes, f);
+    if (!near || Math.abs(near.errorPct) > tol) return { mode: null, errorPct: null, candidates: 0 };
+    return { mode: near.mode, errorPct: near.errorPct, candidates };
+  }
+
+  /*
+   * Level in dB of one tone in an AnalyserNode spectrum (dB per bin).
+   * Sums the power of the bins around f, which covers the window's main lobe,
+   * so the reading does not ripple as a gliding tone crosses bin centres.
+   */
+  function bandLevelDb(spectrum, binHz, f, halfBins) {
+    const h = halfBins == null ? 3 : halfBins;
+    const centre = Math.round(f / binHz);
+    let power = 0, any = false;
+    for (let k = Math.max(1, centre - h); k <= Math.min(spectrum.length - 1, centre + h); k++) {
+      const db = spectrum[k];
+      if (Number.isFinite(db)) { power += Math.pow(10, db / 10); any = true; }
+    }
+    return any && power > 0 ? 10 * Math.log10(power) : null;
+  }
+
+  /*
+   * Which frequency a level reading taken `elapsed` seconds into a sweep belongs to.
+   * The analyser looks back over its window and the sound reaches the microphone
+   * late, so the reading describes the tone emitted `delay` seconds ago.
+   * Returns null while the delayed tone has not started yet.
+   */
+  function sweepReadingFreq(f1, f2, dur, elapsed, delay) {
+    const t = elapsed - delay;
+    if (!(dur > 0) || t < 0) return null;
+    return sweepFreq(f1, f2, t / dur);
+  }
+
+  // Sweep rate in Hz per second at frequency f of a logarithmic sweep
+  function sweepRate(f1, f2, dur, f) {
+    return f * Math.log(f2 / f1) / dur;
+  }
+
+  return { ROOMS, speedOfSound, roomModes, estimateModeCount, modeType, noteName, sweepFreq, sweepRate, sweepReadingFreq,
+    findPeaks, strongestPeaks, nearestMode, matchMode, bandLevelDb };
 });

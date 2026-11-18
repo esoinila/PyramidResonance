@@ -12,16 +12,31 @@
     }
 
     // ---------- Settings ----------
-    const DEFAULTS = { room: 'khufu', L: 5, W: 4, H: 2.5, temp: 20, fMin: 60, fMax: 250, volume: 0.5, filter: 'axial', sweepDur: 60 };
+    const MAX_MODES = 6000;   // refuse ranges that would compute more than this
+    const MAX_LISTED = 400;   // buttons in the tone list
+    const DEFAULTS = { room: 'khufu', L: 5, W: 4, H: 2.5, temp: 20, fMin: 60, fMax: 250, volume: 0.5, filter: 'axial', sweepDur: 60, speaker: 'bt' };
+    const LIMITS = { L: [0.5, 100], W: [0.5, 100], H: [0.5, 100], temp: [-20, 50], fMin: [10, 2000], fMax: [20, 4000], volume: [0, 1] };
+    const CHOICES = { room: ['khufu', 'khafre', 'menkaure', 'custom'], filter: ['axial', 'tangential', 'all'], sweepDur: [30, 60, 120], speaker: ['bt', 'direct'] };
     const settings = Object.assign({}, DEFAULTS);
+
+    // Force every setting into its allowed range, whatever was typed or stored
+    function sanitize(s) {
+        for (const k of Object.keys(LIMITS)) {
+            const v = Number(s[k]);
+            s[k] = Number.isFinite(v) ? Math.min(LIMITS[k][1], Math.max(LIMITS[k][0], v)) : DEFAULTS[k];
+        }
+        for (const k of Object.keys(CHOICES)) {
+            if (!CHOICES[k].includes(s[k])) s[k] = DEFAULTS[k];
+        }
+        return s;
+    }
     try {
         const saved = JSON.parse(localStorage.getItem('pyramid-res-v2') || 'null');
         if (saved && typeof saved === 'object') {
-            for (const k of Object.keys(DEFAULTS)) {
-                if (typeof saved[k] === typeof DEFAULTS[k]) settings[k] = saved[k];
-            }
+            for (const k of Object.keys(DEFAULTS)) if (k in saved) settings[k] = saved[k];
         }
     } catch (e) { /* storage unavailable: defaults are fine */ }
+    sanitize(settings);
     function save() {
         try { localStorage.setItem('pyramid-res-v2', JSON.stringify(settings)); } catch (e) { /* ignore */ }
     }
@@ -29,6 +44,7 @@
     let modes = [];       // every predicted mode in range
     let shown = [];       // modes after the filter, as listed
     let activeIdx = -1;   // index into shown of the playing tone
+    let lastIdx = -1;     // stepper position; survives Stop
 
     function roomDims() {
         if (settings.room !== 'custom' && M.ROOMS[settings.room]) {
@@ -52,31 +68,41 @@
         return n.name + ' ' + (n.cents >= 0 ? '+' : '') + n.cents + '¢';
     }
 
+    // Returns false when the range holds too many modes to compute; nothing is computed then
     function recompute() {
         const d = roomDims();
         const c = M.speedOfSound(settings.temp);
-        let warn = '';
+        let warn = '', ok = true;
         if (!(settings.fMax > settings.fMin)) warn = '"To Hz" must be higher than "From Hz".';
-        else if (!(d.L > 0 && d.W > 0 && d.H > 0)) warn = 'Enter length, width and height in metres.';
+        const estimate = warn ? 0 : M.estimateModeCount(d.L, d.W, d.H, c, settings.fMin, settings.fMax);
+        if (estimate > MAX_MODES) {
+            warn = 'About ' + Math.round(estimate).toLocaleString() + ' modes in that range: too many. Lower "To Hz" or raise "From Hz".';
+            ok = false;
+        }
         modes = warn ? [] : M.roomModes(d.L, d.W, d.H, c, settings.fMin, settings.fMax);
-        shown = modes.filter((m) => settings.filter === 'all' || m.type === 'axial' || (settings.filter === 'tangential' && m.type === 'tangential'));
+        const filtered = modes.filter((m) => settings.filter === 'all' || m.type === 'axial' || (settings.filter === 'tangential' && m.type === 'tangential'));
+        shown = filtered.slice(0, MAX_LISTED);
         $('roomWarn').textContent = warn;
         const r = M.ROOMS[settings.room];
         $('roomNote').textContent = (r ? r.note + ' ' : '') + 'Speed of sound ' + c.toFixed(1) + ' m/s. ' +
-            modes.length + ' modes in range, ' + shown.length + ' listed.';
+            modes.length + ' modes in range, ' + shown.length + ' listed' +
+            (filtered.length > shown.length ? ' (the lowest ' + MAX_LISTED + ' of ' + filtered.length + ')' : '') + '.';
         activeIdx = -1;
+        lastIdx = -1;
         renderList();
+        setButtons();
         drawChart();
+        return ok;
     }
 
+    // Built only when the mode list changes; taps just move the highlight
     function renderList() {
         const host = $('modeList');
         host.textContent = '';
         shown.forEach((m, i) => {
             const b = document.createElement('button');
             b.type = 'button';
-            b.className = 'mode' + (i === activeIdx ? ' active' : '');
-            b.setAttribute('role', 'listitem');
+            b.className = 'mode';
             const f = document.createElement('b'); f.textContent = m.f.toFixed(1) + ' Hz';
             const n = document.createElement('span'); n.textContent = noteText(m.f);
             const t = document.createElement('span'); t.textContent = describe(m);
@@ -84,7 +110,16 @@
             b.addEventListener('click', () => playMode(i));
             host.appendChild(b);
         });
-        $('prev').disabled = $('next').disabled = shown.length === 0;
+    }
+    function setActive(idx) {
+        const kids = $('modeList').children;
+        if (activeIdx >= 0 && kids[activeIdx]) { kids[activeIdx].classList.remove('active'); kids[activeIdx].removeAttribute('aria-current'); }
+        activeIdx = idx;
+        if (idx >= 0 && kids[idx]) {
+            kids[idx].classList.add('active');
+            kids[idx].setAttribute('aria-current', 'true');
+            if (kids[idx].scrollIntoView) kids[idx].scrollIntoView({ block: 'nearest' });
+        }
     }
 
     function syncInputs() {
@@ -101,68 +136,111 @@
         $('volume').value = settings.volume;
         $('modeFilter').value = settings.filter;
         $('sweepDur').value = String(settings.sweepDur);
+        $('speaker').value = settings.speaker;
     }
 
     // ---------- Audio output ----------
     let ctx = null;
-    let voice = null;     // { osc, gain, kind: 'tone' | 'sweep', f1, f2, t0, dur }
+    let volNode = null;   // one volume control for everything
+    let voice = null;     // { osc, env, kind: 'tone' | 'sweep', f1, f2, t0, dur }
     let wakeLock = null;
+    let wakePending = false;
+    let lastVoiceStopMs = -1e9;
 
     function setSessionType(type) {
         // Safari: lets Web Audio play with the silent switch on, and choose routing with the mic
         try { if (navigator.audioSession) navigator.audioSession.type = type; } catch (e) { /* not supported */ }
     }
 
+    // Must be entered synchronously from a tap: the context is created and resumed before any await
     async function ensureCtx() {
         if (!ctx) {
             const AC = window.AudioContext || window.webkitAudioContext;
             if (!AC) throw new Error('This browser has no Web Audio support.');
             ctx = new AC();
+            volNode = ctx.createGain();
+            volNode.gain.value = settings.volume;
+            volNode.connect(ctx.destination);
+            ctx.onstatechange = () => {
+                if (ctx.state !== 'running' && (voice || clapBusy)) interrupted();
+            };
         }
-        if (ctx.state !== 'running') await ctx.resume();
+        if (ctx.state !== 'running') {
+            let timer = null;
+            const timeout = new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error('Audio did not start. Tap again.')), 1500); });
+            try { await Promise.race([ctx.resume(), timeout]); } finally { clearTimeout(timer); }
+            if (ctx.state !== 'running') throw new Error('Audio did not start. Tap again.');
+        }
         return ctx;
+    }
+
+    function interrupted() {
+        stopAll();
+        $('audioWarn').textContent = 'Audio was interrupted. Tap a tone or the sweep to start again.';
+    }
+
+    async function acquireWake() {
+        if (!navigator.wakeLock || wakeLock || wakePending) return;
+        wakePending = true;
+        let sentinel = null;
+        try { sentinel = await navigator.wakeLock.request('screen'); } catch (e) { sentinel = null; }
+        wakePending = false;
+        if (!sentinel) return;
+        if (voice && !wakeLock) {
+            wakeLock = sentinel;
+            if (sentinel.addEventListener) sentinel.addEventListener('release', () => { if (wakeLock === sentinel) wakeLock = null; });
+        } else {
+            try { sentinel.release(); } catch (e) { /* ignore */ }
+        }
+    }
+    function releaseWake() {
+        const s = wakeLock;
+        wakeLock = null;
+        if (s) { try { s.release(); } catch (e) { /* ignore */ } }
     }
 
     function stopVoice() {
         const v = voice;
         voice = null;
         if (v && ctx) {
+            lastVoiceStopMs = performance.now();
             const t = ctx.currentTime;
             try {
-                v.gain.gain.cancelScheduledValues(t);
-                v.gain.gain.setValueAtTime(v.gain.gain.value, t);
-                v.gain.gain.linearRampToValueAtTime(0, t + 0.08);
+                v.env.gain.cancelScheduledValues(t);
+                v.env.gain.setValueAtTime(v.env.gain.value, t);
+                v.env.gain.linearRampToValueAtTime(0, t + 0.08);
                 v.osc.stop(t + 0.1);
             } catch (e) { /* already stopped */ }
         }
-        if (wakeLock) { try { wakeLock.release(); } catch (e) { /* ignore */ } wakeLock = null; }
+        releaseWake();
     }
 
+    // Throws if the browser refuses; callers show the message
     function startVoice(kind, f1, f2, dur) {
         stopVoice();
         const t = ctx.currentTime + 0.02;
         const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
+        const env = ctx.createGain();   // fade in and out only; volume is volNode
         osc.type = 'sine';
         osc.frequency.setValueAtTime(f1, t);
-        gain.gain.setValueAtTime(0, t);
-        gain.gain.linearRampToValueAtTime(settings.volume, t + 0.08);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        const v = { osc, gain, kind, f1, f2, t0: t, dur };
-        if (kind === 'sweep') {
-            osc.frequency.exponentialRampToValueAtTime(f2, t + dur);
-            gain.gain.setValueAtTime(settings.volume, t + dur);
-            gain.gain.linearRampToValueAtTime(0, t + dur + 0.08);
-            osc.stop(t + dur + 0.1);
-        }
+        env.gain.setValueAtTime(0, t);
+        env.gain.linearRampToValueAtTime(1, t + 0.08);
+        osc.connect(env);
+        env.connect(volNode);
+        const v = { osc, env, kind, f1, f2, t0: t, dur };
         osc.onended = () => {
-            osc.disconnect();
-            gain.disconnect();
-            if (voice === v) { voice = null; onStopped(v); }
+            try { osc.disconnect(); env.disconnect(); } catch (e) { /* ignore */ }
+            if (voice === v) { voice = null; lastVoiceStopMs = performance.now(); onStopped(v); }
         };
         osc.start(t);
+        if (kind === 'sweep') {
+            osc.frequency.exponentialRampToValueAtTime(f2, t + dur);
+            env.gain.setValueAtTime(1, t + dur);
+            env.gain.linearRampToValueAtTime(0, t + dur + 0.08);
+            osc.stop(t + dur + 0.1);
+        }
         voice = v;
+        acquireWake();
         return v;
     }
 
@@ -172,34 +250,42 @@
     }
 
     function setButtons() {
+        const sweeping = !!(voice && voice.kind === 'sweep');
         $('stop').disabled = !voice;
-        $('sweep').textContent = voice && voice.kind === 'sweep' ? 'Stop sweep' : 'Start sweep';
+        $('sweep').textContent = sweeping ? 'Stop sweep' : 'Start sweep';
+        $('sweep').disabled = clapBusy;
+        $('prev').disabled = $('next').disabled = shown.length === 0 || clapBusy;
+        $('speaker').disabled = $('sweepDur').disabled = sweeping;
     }
 
+    // Called when a voice has ended, by Stop or on its own
     function onStopped(v) {
+        releaseWake();
         if (v && v.kind === 'sweep') finishSweep();
         setNow('–', 'Nothing playing');
-        activeIdx = -1;
-        renderList();
+        setActive(-1);
         setButtons();
         drawChart();
     }
 
     async function playMode(i) {
-        if (!shown.length) return;
+        if (!shown.length || clapBusy) return;
         const idx = ((i % shown.length) + shown.length) % shown.length;
         const m = shown[idx];
         try {
             await ensureCtx();
-        } catch (e) { $('audioWarn').textContent = e.message; return; }
+            if (clapBusy) return;
+            if (voice && voice.kind === 'sweep') abortSweep();
+            startVoice('tone', m.f, m.f, 0);
+        } catch (e) {
+            onStopped(null);
+            $('audioWarn').textContent = e && e.message ? e.message : 'Audio could not start.';
+            return;
+        }
         $('audioWarn').textContent = '';
-        if (voice && voice.kind === 'sweep') abortSweep();
-        startVoice('tone', m.f, m.f, 0);
-        activeIdx = idx;
+        lastIdx = idx;
+        setActive(idx);
         setNow(m.f.toFixed(1) + ' Hz', noteText(m.f) + ' · ' + describe(m));
-        renderList();
-        const el = $('modeList').children[idx];
-        if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
         setButtons();
         drawChart();
     }
@@ -208,49 +294,77 @@
         const v = voice;
         stopVoice();
         if (v && v.kind === 'sweep') abortSweep();
+        cancelClap();
         onStopped(null);
     }
 
     // ---------- Sweep ----------
-    let curve = [];          // measured points [{ f, db }]
-    let curveKind = '';      // 'sweep' | 'clap'
+    let curve = [];           // measured points [{ f, db }]
+    let curveKind = '';       // 'sweep' | 'clap'
+    let recording = false;    // this sweep is being measured
+    let disturbed = false;    // volume was changed while recording
     let sweepTimer = null;
-    let lastSweepF = 0;
+    let lastReadF = 0;
 
-    function currentSweepFreq() {
+    function emittedFreq() {
         if (!voice || voice.kind !== 'sweep') return null;
-        const t = (ctx.currentTime - voice.t0) / voice.dur;
-        return M.sweepFreq(voice.f1, voice.f2, t);
+        return M.sweepFreq(voice.f1, voice.f2, (ctx.currentTime - voice.t0) / voice.dur);
+    }
+
+    // Seconds between the context clock and the sound leaving the speaker
+    function outputDelay() {
+        const reported = (ctx.baseLatency || 0) + (ctx.outputLatency || 0);
+        // Bluetooth speakers buffer about 0.2 s; browsers do not always report it
+        return settings.speaker === 'bt' ? Math.max(reported, 0.2) : reported;
     }
 
     async function toggleSweep() {
+        if (clapBusy) return;
         if (voice && voice.kind === 'sweep') { stopAll(); return; }
-        if (!(settings.fMax > settings.fMin)) return;
+        if (!(settings.fMax > settings.fMin)) {
+            $('audioWarn').textContent = 'Set "To Hz" higher than "From Hz" in the Room card first.';
+            return;
+        }
         try {
             await ensureCtx();
-        } catch (e) { $('audioWarn').textContent = e.message; return; }
+            if (clapBusy) return;
+            abortSweep();
+            recording = micOn;
+            if (recording) { curve = []; curveKind = 'sweep'; disturbed = false; $('peaks').textContent = ''; }
+            lastReadF = 0;
+            setActive(-1);
+            startVoice('sweep', settings.fMin, settings.fMax, settings.sweepDur);
+        } catch (e) {
+            recording = false;
+            onStopped(null);
+            $('audioWarn').textContent = e && e.message ? e.message : 'Audio could not start.';
+            return;
+        }
         $('audioWarn').textContent = '';
-        activeIdx = -1;
-        renderList();
-        if (micOn) { curve = []; curveKind = 'sweep'; $('peaks').textContent = ''; }
-        lastSweepF = 0;
-        startVoice('sweep', settings.fMin, settings.fMax, settings.sweepDur);
-        try { if (navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { wakeLock = null; }
-        clearInterval(sweepTimer);
         sweepTimer = setInterval(sweepTick, 50);
         setButtons();
     }
 
     function sweepTick() {
-        const f = currentSweepFreq();
-        if (f == null) { clearInterval(sweepTimer); sweepTimer = null; return; }
+        const f = emittedFreq();
+        if (f == null) { abortSweep(); return; }
         setNow(f.toFixed(1) + ' Hz', 'Sweeping · ' + noteText(f));
-        if (micOn && curveKind === 'sweep' && ctx.currentTime >= voice.t0 && f >= lastSweepF * 1.004) {
-            // the tone moves during one FFT window: search as many bins as it can cross
-            const windowS = analyser.fftSize / ctx.sampleRate;
-            const rate = f * Math.log(voice.f2 / voice.f1) / voice.dur;
-            const db = levelAt(f, rate * windowS);
-            if (db != null) { curve.push({ f, db }); lastSweepF = f; }
+        if (recording && micOn) {
+            // The analyser sees the last windowS seconds, and the sound left the speaker late.
+            // A reading therefore belongs to the tone emitted (window/2 + output delay) ago.
+            const windowS = fast.fftSize / ctx.sampleRate;
+            const out = outputDelay();
+            const elapsed = ctx.currentTime - voice.t0;
+            if (elapsed - out >= windowS) {
+                const fr = M.sweepReadingFreq(voice.f1, voice.f2, voice.dur, elapsed, out + windowS / 2);
+                if (fr != null && fr >= lastReadF * 1.004) {
+                    fast.getFloatFrequencyData(fastSpectrum);
+                    const binHz = ctx.sampleRate / fast.fftSize;
+                    const smear = M.sweepRate(voice.f1, voice.f2, voice.dur, fr) * windowS / 2;
+                    const db = M.bandLevelDb(fastSpectrum, binHz, fr, 3 + Math.ceil(smear / binHz));
+                    if (db != null) { curve.push({ f: fr, db }); lastReadF = fr; }
+                }
+            }
         }
         drawChart(f);
     }
@@ -262,122 +376,146 @@
 
     function finishSweep() {
         abortSweep();
-        if (curveKind === 'sweep' && curve.length > 10) showPeaks(M.findPeaks(curve, 4, 12));
+        const wasRecording = recording;
+        recording = false;
+        if (wasRecording && curveKind === 'sweep' && curve.length > 10) showPeaks(M.findPeaks(curve, 4, 12));
     }
 
     // ---------- Microphone ----------
     let micOn = false;
+    let micBusy = false;
     let micStream = null;
     let micSource = null;
-    let analyser = null;
-    let spectrum = null;
+    let fine = null, fineSpectrum = null;   // 32768 points: clap spectrum and level meter
+    let fast = null, fastSpectrum = null;   // 8192 points: follows a gliding tone
     let meterTimer = null;
     let clapTimer = null;
-
-    function levelAt(f, spanHz) {
-        if (!analyser) return null;
-        analyser.getFloatFrequencyData(spectrum);
-        const binHz = ctx.sampleRate / analyser.fftSize;
-        const centre = Math.round(f / binHz);
-        const half = Math.max(2, Math.ceil((spanHz || 0) / binHz) + 1);
-        let best = -Infinity;
-        for (let k = Math.max(1, centre - half); k <= Math.min(spectrum.length - 1, centre + half); k++) {
-            if (spectrum[k] > best) best = spectrum[k];
-        }
-        return Number.isFinite(best) ? best : null;
-    }
+    let clapBusy = false;
 
     async function toggleMic() {
+        if (micBusy) return;
         if (micOn) { micOff(); return; }
         $('micWarn').textContent = '';
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             $('micWarn').textContent = 'No microphone access in this browser. It needs https and a recent browser.';
             return;
         }
+        micBusy = true;
+        $('mic').disabled = true;
+        let stream = null;
         try {
             setSessionType('play-and-record');
             await ensureCtx();
-            micStream = await navigator.mediaDevices.getUserMedia({
+            stream = await navigator.mediaDevices.getUserMedia({
                 audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
             });
-            micSource = ctx.createMediaStreamSource(micStream);
-            analyser = ctx.createAnalyser();
-            analyser.fftSize = 32768;
-            analyser.smoothingTimeConstant = 0;
-            spectrum = new Float32Array(analyser.frequencyBinCount);
-            micSource.connect(analyser); // analysis only: never routed to the speaker
+            micStream = stream;
+            micSource = ctx.createMediaStreamSource(stream);
+            fine = ctx.createAnalyser(); fine.fftSize = 32768; fine.smoothingTimeConstant = 0;
+            fast = ctx.createAnalyser(); fast.fftSize = 8192; fast.smoothingTimeConstant = 0;
+            fineSpectrum = new Float32Array(fine.frequencyBinCount);
+            fastSpectrum = new Float32Array(fast.frequencyBinCount);
+            micSource.connect(fine);   // analysis only: never routed to the speaker
+            micSource.connect(fast);
+            stream.getTracks().forEach((t) => { t.onended = () => { if (micStream === stream) micOff('The microphone was taken away by the system.'); }; });
             micOn = true;
             $('mic').textContent = 'Turn microphone off';
             $('mic').classList.add('on');
-            $('clap').disabled = false;
             meterTimer = setInterval(meterTick, 100);
         } catch (e) {
-            micOff();
-            $('micWarn').textContent = 'Microphone not available: ' + (e && e.message ? e.message : e);
+            if (stream) stream.getTracks().forEach((t) => t.stop());
+            micOff('Microphone not available: ' + (e && e.message ? e.message : e));
         }
+        micBusy = false;
+        $('mic').disabled = false;
+        setClapButton();
     }
 
-    function micOff() {
+    function micOff(message) {
         clearInterval(meterTimer); meterTimer = null;
-        clearInterval(clapTimer); clapTimer = null;
+        cancelClap();
+        recording = false;
         if (micSource) { try { micSource.disconnect(); } catch (e) { /* ignore */ } }
-        if (micStream) micStream.getTracks().forEach((t) => t.stop());
-        micSource = null; micStream = null; analyser = null; spectrum = null;
+        if (micStream) micStream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+        micSource = null; micStream = null; fine = null; fast = null; fineSpectrum = null; fastSpectrum = null;
         micOn = false;
         setSessionType('playback');
         $('mic').textContent = 'Turn microphone on';
         $('mic').classList.remove('on');
-        $('clap').disabled = true;
-        $('clap').textContent = 'Record a clap (4 s)';
         $('meterBar').style.width = '0';
         $('meterText').textContent = 'Microphone off';
+        $('micWarn').textContent = message || '';
+        setClapButton();
+        setButtons();
+    }
+
+    function setClapButton(text) {
+        $('clap').disabled = !micOn || clapBusy;
+        $('clap').textContent = text || 'Record a clap (4 s)';
     }
 
     function meterTick() {
-        if (!micOn) return;
-        let f = null, label = 'loudest in range';
-        if (voice && voice.kind === 'tone') { f = voice.f1; label = 'at ' + f.toFixed(1) + ' Hz'; }
-        else if (voice && voice.kind === 'sweep') { f = currentSweepFreq(); label = 'at sweep tone'; }
-        let db;
-        if (f != null) db = levelAt(f, 0);
-        else {
-            analyser.getFloatFrequencyData(spectrum);
-            const binHz = ctx.sampleRate / analyser.fftSize;
-            db = -Infinity;
-            for (let k = Math.max(1, Math.floor(settings.fMin / binHz)); k <= Math.min(spectrum.length - 1, Math.ceil(settings.fMax / binHz)); k++) {
-                if (spectrum[k] > db) db = spectrum[k];
-            }
+        if (!micOn || !ctx) return;
+        const binHz = ctx.sampleRate / fine.fftSize;
+        fine.getFloatFrequencyData(fineSpectrum);
+        let db = null, label = 'loudest in range';
+        if (voice && voice.kind === 'tone') {
+            db = M.bandLevelDb(fineSpectrum, binHz, voice.f1, 3);
+            label = 'at ' + voice.f1.toFixed(1) + ' Hz';
+        } else {
+            let best = -Infinity;
+            const k0 = Math.max(1, Math.floor(settings.fMin / binHz));
+            const k1 = Math.min(fineSpectrum.length - 1, Math.ceil(settings.fMax / binHz));
+            for (let k = k0; k <= k1; k++) if (fineSpectrum[k] > best) best = fineSpectrum[k];
+            db = Number.isFinite(best) ? best : null;
         }
-        if (db == null || !Number.isFinite(db)) { $('meterText').textContent = 'Listening…'; return; }
+        if (db == null) { $('meterText').textContent = 'Listening…'; return; }
         const pct = Math.max(0, Math.min(100, (db + 100) / 80 * 100)); // -100..-20 dB
         $('meterBar').style.width = pct + '%';
         $('meterText').textContent = db.toFixed(1) + ' dB ' + label;
     }
 
+    function cancelClap() {
+        if (!clapBusy) return;
+        clearInterval(clapTimer); clapTimer = null;
+        clapBusy = false;
+        setClapButton();
+        setButtons();
+    }
+
     function recordClap() {
-        if (!micOn || clapTimer) return;
+        if (!micOn || clapBusy || micBusy) return;
         if (voice) stopAll();
-        const binHz = ctx.sampleRate / analyser.fftSize;
+        clapBusy = true;
+        setButtons();
+        const binHz = ctx.sampleRate / fine.fftSize;
         const k0 = Math.max(1, Math.floor(settings.fMin / binHz));
-        const k1 = Math.min(spectrum.length - 1, Math.ceil(settings.fMax / binHz));
+        const k1 = Math.min(fineSpectrum.length - 1, Math.ceil(settings.fMax / binHz));
         const hold = new Float32Array(k1 - k0 + 1).fill(-Infinity);
-        const tEnd = ctx.currentTime + 4;
-        $('clap').disabled = true;
-        $('clap').textContent = 'Clap now…';
+        // Let any tone that was playing ring out and leave the analyser's window first
+        const startMs = Math.max(performance.now() + 900, lastVoiceStopMs + 2500);
+        const endMs = startMs + 4000;
+        setClapButton('Wait…');
         clapTimer = setInterval(() => {
-            if (!micOn) return;
-            analyser.getFloatFrequencyData(spectrum);
-            for (let k = k0; k <= k1; k++) if (spectrum[k] > hold[k - k0]) hold[k - k0] = spectrum[k];
-            if (ctx.currentTime >= tEnd) {
-                clearInterval(clapTimer); clapTimer = null;
-                curve = [];
-                for (let k = k0; k <= k1; k++) if (Number.isFinite(hold[k - k0])) curve.push({ f: k * binHz, db: hold[k - k0] });
-                curveKind = 'clap';
-                $('clap').disabled = false;
-                $('clap').textContent = 'Record a clap (4 s)';
-                showPeaks(M.findPeaks(curve, 6, 14));
-                drawChart();
+            const now = performance.now();
+            if (!micOn || !fine) { cancelClap(); return; }
+            if (now < startMs) return;
+            if (now < endMs) {
+                $('clap').textContent = 'Clap now…';
+                fine.getFloatFrequencyData(fineSpectrum);
+                for (let k = k0; k <= k1; k++) if (fineSpectrum[k] > hold[k - k0]) hold[k - k0] = fineSpectrum[k];
+                return;
             }
+            clearInterval(clapTimer); clapTimer = null;
+            clapBusy = false;
+            curve = [];
+            for (let k = k0; k <= k1; k++) if (Number.isFinite(hold[k - k0])) curve.push({ f: k * binHz, db: hold[k - k0] });
+            curveKind = 'clap';
+            disturbed = false;
+            setClapButton();
+            setButtons();
+            showPeaks(M.findPeaks(curve, 6, 14));
+            drawChart();
         }, 60);
     }
 
@@ -385,55 +523,71 @@
     function showPeaks(peaks) {
         const host = $('peaks');
         host.textContent = '';
+        const note = (text) => { const p = document.createElement('p'); p.className = 'hint'; p.textContent = text; host.appendChild(p); };
         if (!peaks.length) {
-            const p = document.createElement('p');
-            p.className = 'hint';
-            p.textContent = 'No clear peaks found. Try more volume, a corner position, or a longer sweep.';
-            host.appendChild(p);
+            note('No clear peaks found. Try more volume, a corner position, or a longer sweep.');
             return;
         }
         const table = document.createElement('table');
         const head = document.createElement('tr');
-        ['Measured', 'Note', 'Nearest predicted', 'Miss'].forEach((h) => { const th = document.createElement('th'); th.textContent = h; head.appendChild(th); });
+        ['Measured', 'Note', 'Nearest listed mode', 'Miss'].forEach((h) => { const th = document.createElement('th'); th.textContent = h; head.appendChild(th); });
         table.appendChild(head);
-        peaks.slice(0, 12).forEach((p) => {
-            const near = M.nearestMode(modes, p.f);
+        M.strongestPeaks(peaks, 12).forEach((p) => {
+            const match = M.matchMode(shown, p.f, 3);
+            let nearest = 'none within 3 %', miss = '–';
+            if (match.mode && match.candidates > 3) nearest = match.candidates + ' modes within 3 %: too dense to tell';
+            else if (match.mode) {
+                nearest = match.mode.f.toFixed(1) + ' Hz ' + describe(match.mode);
+                miss = (match.errorPct >= 0 ? '+' : '') + match.errorPct.toFixed(1) + ' %';
+            }
             const tr = document.createElement('tr');
-            const cells = [p.f.toFixed(1) + ' Hz', noteText(p.f),
-                near ? near.mode.f.toFixed(1) + ' Hz ' + describe(near.mode) : '–',
-                near ? (near.errorPct >= 0 ? '+' : '') + near.errorPct.toFixed(1) + ' %' : '–'];
-            cells.forEach((c) => { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); });
+            [p.f.toFixed(1) + ' Hz', noteText(p.f), nearest, miss].forEach((c) => { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); });
             table.appendChild(tr);
         });
         host.appendChild(table);
+        note('Compared with the ' + shown.length + ' modes listed under "Single tones". A peak near a listed mode is consistent with it, not proof of it.');
+        if (curveKind === 'sweep') {
+            // about +-0.15 s of unknown speaker delay, turned into a frequency error
+            const pct = 100 * Math.log(settings.fMax / settings.fMin) / settings.sweepDur * 0.15;
+            note('Sweep frequencies are good to about ±' + (pct < 0.1 ? '0.1' : pct.toFixed(1)) + ' % because the speaker delay is not known exactly.' +
+                (pct > 0.5 ? ' A longer sweep or a narrower range is more accurate.' : ''));
+            if (disturbed) note('The volume was changed during this sweep, so levels before and after the change are not comparable.');
+        }
     }
 
     function drawChart(cursorF) {
         const cv = $('chart');
+        const dpr = window.devicePixelRatio || 1;
+        const Wd = cv.clientWidth || 320, Hd = cv.clientHeight || 220;
+        if (cv.width !== Math.round(Wd * dpr) || cv.height !== Math.round(Hd * dpr)) {
+            cv.width = Math.round(Wd * dpr);
+            cv.height = Math.round(Hd * dpr);
+        }
         const g = cv.getContext('2d');
-        const Wd = cv.width, Hd = cv.height;
-        const padL = 70, padR = 16, padT = 44, padB = 44;
-        g.clearRect(0, 0, Wd, Hd);
+        g.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const padL = 52, padR = 10, padT = 24, padB = 22;
         g.fillStyle = '#0b0b0b';
         g.fillRect(0, 0, Wd, Hd);
+        $('chartTitle').textContent = curveKind === 'clap' ? 'Measurement: clap spectrum' : curveKind === 'sweep' ? 'Measurement: sweep' : 'Measurement';
         const f1 = settings.fMin, f2 = settings.fMax;
         if (!(f2 > f1) || !(f1 > 0)) return;
         const x = (f) => padL + (Wd - padL - padR) * Math.log(f / f1) / Math.log(f2 / f1);
-        g.font = '22px system-ui, sans-serif';
+        g.font = '11px system-ui, sans-serif';
         g.textBaseline = 'middle';
         // frequency grid
         g.strokeStyle = '#2c2c2c'; g.fillStyle = '#a8a8a8'; g.lineWidth = 1; g.textAlign = 'center';
+        let lastLabelX = -1e9;
         [20, 30, 40, 50, 60, 80, 100, 150, 200, 300, 400, 600, 800, 1000, 1500, 2000, 3000].forEach((f) => {
             if (f < f1 || f > f2) return;
             g.beginPath(); g.moveTo(x(f), padT); g.lineTo(x(f), Hd - padB); g.stroke();
-            g.fillText(f + ' Hz', x(f), Hd - padB / 2);
+            if (x(f) - lastLabelX >= 44) { g.fillText(f + ' Hz', Math.min(x(f), Wd - 22), Hd - padB / 2); lastLabelX = x(f); }
         });
         // predicted modes (the ones listed under "Single tones")
         shown.forEach((m) => {
             const axial = m.type === 'axial';
             g.strokeStyle = axial ? '#d4af37' : '#6f5c1d';
-            g.lineWidth = axial ? 3 : 1;
-            g.beginPath(); g.moveTo(x(m.f), 6); g.lineTo(x(m.f), axial ? 34 : 20); g.stroke();
+            g.lineWidth = axial ? 2 : 1;
+            g.beginPath(); g.moveTo(x(m.f), 3); g.lineTo(x(m.f), axial ? 18 : 10); g.stroke();
         });
         // measured curve
         if (curve.length > 1) {
@@ -443,9 +597,9 @@
             if (hi - lo < 10) lo = hi - 10;
             const y = (db) => padT + (Hd - padT - padB) * (1 - (Math.max(db, lo) - lo) / (hi - lo));
             g.fillStyle = '#a8a8a8'; g.textAlign = 'right';
-            g.fillText(hi.toFixed(0) + ' dB', padL - 8, padT + 4);
-            g.fillText(lo.toFixed(0) + ' dB', padL - 8, Hd - padB - 4);
-            g.strokeStyle = '#d4af37'; g.lineWidth = 3; g.lineJoin = 'round';
+            g.fillText(hi.toFixed(0) + ' dB', padL - 6, padT + 6);
+            g.fillText(lo.toFixed(0) + ' dB', padL - 6, Hd - padB - 6);
+            g.strokeStyle = '#d4af37'; g.lineWidth = 2; g.lineJoin = 'round';
             g.beginPath();
             let started = false;
             curve.forEach((p) => {
@@ -457,54 +611,69 @@
         // cursor: sweep position or the playing tone
         const cf = cursorF != null ? cursorF : (voice && voice.kind === 'tone' ? voice.f1 : null);
         if (cf != null && cf >= f1 && cf <= f2) {
-            g.strokeStyle = '#fff'; g.lineWidth = 2; g.setLineDash([8, 8]);
+            g.strokeStyle = '#fff'; g.lineWidth = 1; g.setLineDash([4, 4]);
             g.beginPath(); g.moveTo(x(cf), padT); g.lineTo(x(cf), Hd - padB); g.stroke();
             g.setLineDash([]);
         }
-        $('chartTitle').textContent = curveKind === 'clap' ? 'Measurement: clap spectrum' : curveKind === 'sweep' ? 'Measurement: sweep' : 'Measurement';
     }
 
     // ---------- Wiring ----------
-    function num(id, key, lo, hi) {
+    // Apply a settings change. A change that would need too many modes is undone.
+    function change(mutate) {
+        const before = Object.assign({}, settings);
+        mutate();
+        sanitize(settings);
+        if (voice || clapBusy) stopAll();
+        curve = []; curveKind = ''; recording = false; $('peaks').textContent = '';
+        if (!recompute()) {
+            const message = $('roomWarn').textContent;
+            Object.assign(settings, before);
+            recompute();
+            $('roomWarn').textContent = message + ' Kept the previous range.';
+        }
+        save();
+        syncInputs();
+    }
+    function num(id, key) {
         $(id).addEventListener('change', () => {
             const v = parseFloat($(id).value);
-            if (Number.isFinite(v)) settings[key] = Math.min(hi, Math.max(lo, v));
-            if (voice) stopAll();
-            curve = []; curveKind = ''; $('peaks').textContent = '';
-            save(); syncInputs(); recompute();
+            if (!Number.isFinite(v)) { syncInputs(); return; }
+            change(() => { settings[key] = v; });
         });
     }
-    num('dimL', 'L', 0.5, 100); num('dimW', 'W', 0.5, 100); num('dimH', 'H', 0.5, 100);
-    num('temp', 'temp', -20, 50); num('fMin', 'fMin', 10, 2000); num('fMax', 'fMax', 20, 4000);
+    num('dimL', 'L'); num('dimW', 'W'); num('dimH', 'H');
+    num('temp', 'temp'); num('fMin', 'fMin'); num('fMax', 'fMax');
 
-    $('room').addEventListener('change', () => {
-        const prev = roomDims();
-        settings.room = $('room').value;
-        if (settings.room === 'custom' && !(settings.L > 0 && settings.W > 0 && settings.H > 0)) Object.assign(settings, prev);
-        if (voice) stopAll();
-        curve = []; curveKind = ''; $('peaks').textContent = '';
-        save(); syncInputs(); recompute();
-    });
-    $('modeFilter').addEventListener('change', () => {
-        settings.filter = $('modeFilter').value;
-        if (voice && voice.kind === 'tone') stopAll();
-        save(); recompute();
-    });
-    $('sweepDur').addEventListener('change', () => { settings.sweepDur = parseInt($('sweepDur').value, 10) || 60; save(); });
+    $('room').addEventListener('change', () => change(() => { settings.room = $('room').value; }));
+    $('modeFilter').addEventListener('change', () => change(() => { settings.filter = $('modeFilter').value; }));
+    $('sweepDur').addEventListener('change', () => { settings.sweepDur = parseInt($('sweepDur').value, 10); sanitize(settings); save(); syncInputs(); });
+    $('speaker').addEventListener('change', () => { settings.speaker = $('speaker').value; sanitize(settings); save(); syncInputs(); });
     $('volume').addEventListener('input', () => {
         settings.volume = parseFloat($('volume').value);
-        if (voice && ctx && voice.kind === 'tone') voice.gain.gain.setTargetAtTime(settings.volume, ctx.currentTime, 0.03);
+        sanitize(settings);
+        if (volNode && ctx) volNode.gain.setTargetAtTime(settings.volume, ctx.currentTime, 0.03);
+        if (recording) disturbed = true;
         save();
     });
-    $('prev').addEventListener('click', () => playMode(activeIdx < 0 ? shown.length - 1 : activeIdx - 1));
-    $('next').addEventListener('click', () => playMode(activeIdx + 1));
+    $('prev').addEventListener('click', () => playMode(lastIdx < 0 ? shown.length - 1 : lastIdx - 1));
+    $('next').addEventListener('click', () => playMode(lastIdx + 1));
     $('stop').addEventListener('click', stopAll);
     $('sweep').addEventListener('click', toggleSweep);
     $('mic').addEventListener('click', toggleMic);
     $('clap').addEventListener('click', recordClap);
 
+    // A hidden page cannot be trusted to keep playing: stop, so the screen never lies
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden && (voice || clapBusy)) stopAll();
+    });
+    window.addEventListener('resize', () => drawChart());
+
     setSessionType('playback');
     syncInputs();
-    recompute();
-    setButtons();
+    if (!recompute()) {
+        // a stored range that is too large: fall back to the default range, keep the room
+        settings.fMin = DEFAULTS.fMin; settings.fMax = DEFAULTS.fMax; settings.filter = DEFAULTS.filter;
+        syncInputs(); recompute(); save();
+    }
+    setClapButton();
 })();

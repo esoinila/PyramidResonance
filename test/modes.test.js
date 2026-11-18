@@ -87,3 +87,76 @@ test('nearestMode reports the miss in percent', () => {
   close(n.errorPct, 1.45, 0.02);
   assert.strictEqual(M.nearestMode([], 100), null);
 });
+
+// ---------- added after the code review ----------
+
+test('findPeaks sees a peak at either end of the curve', () => {
+  const flat = (n) => Array.from({ length: n }, (_, i) => ({ f: 60 + i, db: -60 }));
+  const a = flat(40); a[0].db = -40;
+  assert.deepStrictEqual(M.findPeaks(a).map((p) => p.f), [60]);
+  const b = flat(40); b[39].db = -40;
+  assert.deepStrictEqual(M.findPeaks(b).map((p) => p.f), [99]);
+});
+
+test('findPeaks copes with empty and very short curves', () => {
+  assert.deepStrictEqual(M.findPeaks([]), []);
+  assert.deepStrictEqual(M.findPeaks([{ f: 100, db: -20 }]), []);
+  assert.deepStrictEqual(M.findPeaks([{ f: 100, db: -20 }, { f: 101, db: -50 }]), []);
+});
+
+test('strongestPeaks keeps the most prominent, in frequency order', () => {
+  const peaks = [10, 3, 8, 1, 9].map((prominence, i) => ({ f: 100 + i * 10, db: 0, prominence }));
+  assert.deepStrictEqual(M.strongestPeaks(peaks, 3).map((p) => p.f), [100, 120, 140]);
+});
+
+test('a mode exactly on the edge of the range is included', () => {
+  const r = M.ROOMS.khufu, c = M.speedOfSound(20);
+  const all = M.roomModes(r.L, r.W, r.H, c, 0, 300);
+  const height4 = all.find((m) => m.nx === 0 && m.ny === 0 && m.nz === 4).f;
+  assert.ok(M.roomModes(r.L, r.W, r.H, c, 60, height4).some((m) => m.label === '(0,0,4)'), 'upper edge');
+  assert.ok(M.roomModes(r.L, r.W, r.H, c, height4, 250).some((m) => m.label === '(0,0,4)'), 'lower edge');
+  // a cube whose axial mode sits exactly on a round number
+  const cube = M.roomModes(1, 1, 1, 340, 0, 170);
+  assert.strictEqual(cube.length, 3);
+});
+
+test('estimateModeCount is within 20 % of the real count and is cheap for huge ranges', () => {
+  const r = M.ROOMS.khufu, c = M.speedOfSound(20);
+  for (const [lo, hi] of [[60, 250], [20, 500], [10, 1000]]) {
+    const real = M.roomModes(r.L, r.W, r.H, c, lo, hi).length;
+    const est = M.estimateModeCount(r.L, r.W, r.H, c, lo, hi);
+    assert.ok(Math.abs(est - real) / real < 0.2, `${lo}-${hi}: ${est} vs ${real}`);
+  }
+  assert.ok(M.estimateModeCount(100, 100, 100, 343, 10, 4000) > 1e6);
+  assert.strictEqual(M.estimateModeCount(0, 1, 1, 343, 10, 100), 0);
+});
+
+test('matchMode refuses a far peak and counts the candidates in a dense list', () => {
+  const sparse = [{ f: 100 }, { f: 200 }];
+  assert.strictEqual(M.matchMode(sparse, 150).mode, null);
+  const hit = M.matchMode(sparse, 101);
+  assert.strictEqual(hit.mode.f, 100);
+  assert.strictEqual(hit.candidates, 1);
+  close(hit.errorPct, 1, 1e-9);
+  const dense = Array.from({ length: 50 }, (_, i) => ({ f: 195 + i * 0.2 }));
+  assert.ok(M.matchMode(dense, 200).candidates > 10);
+  assert.strictEqual(M.matchMode([], 100).mode, null);
+});
+
+test('bandLevelDb sums the power around the tone and ignores silence', () => {
+  const s = new Float32Array(64).fill(-Infinity);
+  s[10] = -20; s[11] = -20;
+  close(M.bandLevelDb(s, 10, 104), -20 + 10 * Math.log10(2), 1e-6);
+  assert.strictEqual(M.bandLevelDb(new Float32Array(64).fill(-Infinity), 10, 100), null);
+  // the reading barely moves as the tone slides between two bin centres
+  const mk = (frac) => { const a = new Float32Array(64).fill(-200); a[20] = 10 * Math.log10(1 - frac + 1e-9); a[21] = 10 * Math.log10(frac + 1e-9); return a; };
+  close(M.bandLevelDb(mk(0.1), 10, 201), M.bandLevelDb(mk(0.9), 10, 209), 1e-3);
+});
+
+test('sweepReadingFreq shifts a reading back by the delay', () => {
+  assert.strictEqual(M.sweepReadingFreq(60, 250, 60, 0.1, 0.3), null);
+  close(M.sweepReadingFreq(60, 250, 60, 0.3, 0.3), 60, 1e-9);
+  close(M.sweepReadingFreq(60, 250, 60, 30.3, 0.3), Math.sqrt(60 * 250), 1e-9);
+  assert.ok(M.sweepReadingFreq(60, 250, 60, 30, 0.3) < M.sweepFreq(60, 250, 0.5));
+  close(M.sweepRate(60, 250, 60, 117.3), 117.3 * Math.log(250 / 60) / 60, 1e-12);
+});
