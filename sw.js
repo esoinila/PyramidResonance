@@ -1,11 +1,20 @@
-// Cache first, refresh in the background: the app opens at once with no signal
-// (inside a pyramid), and an update arrives on the launch after you were online.
-const CACHE_NAME = 'pyramid-res-v3';
+// Offline first. Every file is fetched once, together, when this worker installs,
+// and is then served only from that cache: the app opens at once with no signal and
+// can never be a mix of two versions. To release a change, change VERSION here and
+// BUILD in app.js: a changed sw.js is what makes a phone fetch the new set.
+const VERSION = '2.0.0';
+const CACHE_NAME = 'pyramid-res-' + VERSION;
 const ASSETS = ['./', './index.html', './app.js', './modes.js', './manifest.json', './icon.svg',
     './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
-    event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting()));
+    // all or nothing: if one file fails, the old version stays in charge
+    event.waitUntil(
+        caches.open(CACHE_NAME)
+            .then((cache) => cache.addAll(ASSETS.map((url) => new Request(url, { cache: 'reload' }))))
+            .then(() => self.skipWaiting())
+            .catch((err) => caches.delete(CACHE_NAME).then(() => { throw err; }))
+    );
 });
 
 self.addEventListener('activate', (event) => {
@@ -22,17 +31,9 @@ self.addEventListener('fetch', (event) => {
     event.respondWith((async () => {
         const cache = await caches.open(CACHE_NAME);
         const hit = await cache.match(req, { ignoreSearch: true });
-        const refresh = fetch(req, { cache: 'no-cache' })
-            .then((res) => {
-                if (res && res.ok) return cache.put(req, res.clone()).then(() => res);
-                return res;
-            });
-        if (hit) {
-            event.waitUntil(refresh.catch(() => undefined));
-            return hit;
-        }
+        if (hit) return hit;
         try {
-            return await refresh;
+            return await fetch(req);
         } catch (e) {
             if (req.mode === 'navigate') {
                 const page = await cache.match('./index.html');

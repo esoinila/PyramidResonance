@@ -160,3 +160,54 @@ test('sweepReadingFreq shifts a reading back by the delay', () => {
   assert.ok(M.sweepReadingFreq(60, 250, 60, 30, 0.3) < M.sweepFreq(60, 250, 0.5));
   close(M.sweepRate(60, 250, 60, 117.3), 117.3 * Math.log(250 / 60) / 60, 1e-12);
 });
+
+// ---------- added after the delta inspection ----------
+
+test('mergeClose lists modes that share a frequency as one row', () => {
+  const r = M.ROOMS.khufu;
+  const axial = M.roomModes(r.L, r.W, r.H, M.speedOfSound(20), 60, 250).filter((m) => m.type === 'axial');
+  const rows = M.mergeClose(axial);
+  assert.ok(rows.length < axial.length);
+  for (let i = 1; i < rows.length; i++) assert.ok(rows[i].f / rows[i - 1].f > 1.001, 'rows are distinct');
+  assert.strictEqual(rows.reduce((n, g) => n + 1 + g.also.length, 0), axial.length, 'no mode is lost');
+  const first = rows[0];
+  close(first.f, 65.5, 0.05);
+  assert.strictEqual(first.also.length, 1);
+  // the strongest type wins
+  const mixed = M.mergeClose([{ f: 100, type: 'oblique' }, { f: 100.05, type: 'axial' }, { f: 120, type: 'tangential' }]);
+  assert.deepStrictEqual(mixed.map((g) => g.type), ['axial', 'tangential']);
+  assert.deepStrictEqual(M.mergeClose([]), []);
+});
+
+test('randomHitChance: sparse list is unlikely, crowded list is near certain, overlaps are not counted twice', () => {
+  close(M.randomHitChance([{ f: 100 }], 50, 200, 1.5), Math.log(101.5 / 98.5) / Math.log(4), 1e-9);
+  close(M.randomHitChance([{ f: 100 }, { f: 100 }], 50, 200, 1.5), Math.log(101.5 / 98.5) / Math.log(4), 1e-9);
+  const crowded = Array.from({ length: 400 }, (_, i) => ({ f: 50 + i * 0.4 }));
+  assert.ok(M.randomHitChance(crowded, 50, 200, 1.5) > 0.99);
+  assert.strictEqual(M.randomHitChance([], 50, 200, 1.5), 0);
+  assert.strictEqual(M.randomHitChance([{ f: 100 }], 200, 50, 1.5), 0);
+  assert.ok(M.randomHitChance([{ f: 300 }], 50, 200, 1.5) === 0, 'a mode outside the range does not count');
+});
+
+test('findPeaks marks a peak on the edge of the curve', () => {
+  const pts = Array.from({ length: 40 }, (_, i) => ({ f: 60 + i, db: -60 }));
+  pts[0].db = -40; pts[20].db = -40;
+  const peaks = M.findPeaks(pts);
+  assert.deepStrictEqual(peaks.map((p) => [p.f, p.edge]), [[60, true], [80, false]]);
+});
+
+test('app.js BUILD and sw.js VERSION are the same, and every cached file exists', () => {
+  const fs = require('node:fs'), path = require('node:path');
+  const root = path.join(__dirname, '..');
+  const app = fs.readFileSync(path.join(root, 'app.js'), 'utf8');
+  const sw = fs.readFileSync(path.join(root, 'sw.js'), 'utf8');
+  const build = app.match(/const BUILD = '([^']+)'/)[1];
+  const version = sw.match(/const VERSION = '([^']+)'/)[1];
+  assert.strictEqual(build, version);
+  const assets = sw.match(/const ASSETS = \[([^\]]+)\]/)[1].match(/'[^']+'/g).map((s) => s.slice(1, -1));
+  assert.ok(assets.length >= 9);
+  for (const a of assets) if (a !== './') assert.ok(fs.existsSync(path.join(root, a)), a);
+  // every id the script looks up exists in the page
+  const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+  for (const m of app.matchAll(/\$\('([A-Za-z]+)'\)/g)) assert.ok(html.includes('id="' + m[1] + '"'), 'missing id ' + m[1]);
+});

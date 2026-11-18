@@ -123,7 +123,8 @@
       for (let k = a; k < b; k++) near.push(points[k].db);
       near.sort((x, y) => x - y);
       const median = near[Math.floor(near.length / 2)];
-      if (p.db - median >= prom) peaks.push({ f: p.f, db: p.db, prominence: p.db - median });
+      // edge: the curve was cut off here, so this may be a slope and not a true peak
+      if (p.db - median >= prom) peaks.push({ f: p.f, db: p.db, prominence: p.db - median, edge: i === 0 || i === n - 1 });
     }
     // keep the strongest of any peaks closer than 3 % in frequency
     peaks.sort((x, y) => y.prominence - x.prominence);
@@ -137,6 +138,45 @@
   // The `count` most prominent peaks, returned in frequency order
   function strongestPeaks(peaks, count) {
     return peaks.slice().sort((x, y) => y.prominence - x.prominence).slice(0, count).sort((x, y) => x.f - y.f);
+  }
+
+  /*
+   * Modes that share a frequency (65.5 Hz is both width x2 and length x4 in the
+   * King's Chamber) sound the same, so list them as one row. Returns the first of
+   * each group with `also` = the other members and the strongest type of the group.
+   */
+  function mergeClose(modes, relTol) {
+    const tol = relTol == null ? 0.001 : relTol;
+    const rank = { axial: 0, tangential: 1, oblique: 2 };
+    const out = [];
+    for (const m of modes) {
+      const g = out[out.length - 1];
+      if (g && Math.abs(m.f - g.f) / g.f <= tol) {
+        g.also.push(m);
+        if (rank[m.type] < rank[g.type]) g.type = m.type;
+      } else {
+        out.push(Object.assign({}, m, { also: [] }));
+      }
+    }
+    return out;
+  }
+
+  /*
+   * Chance (0..1) that a frequency picked at random in [fMin, fMax] (evenly on a
+   * log scale) lands within tolPct of some listed mode. Shown next to matches so a
+   * "match" against a crowded list is not mistaken for evidence.
+   */
+  function randomHitChance(modes, fMin, fMax, tolPct) {
+    if (!(fMax > fMin) || !(fMin > 0) || !modes.length) return 0;
+    const t = tolPct / 100;
+    const spans = modes.map((m) => [Math.max(fMin, m.f * (1 - t)), Math.min(fMax, m.f * (1 + t))])
+      .filter((s) => s[1] > s[0]).sort((a, b) => a[0] - b[0]);
+    let covered = 0, end = 0;
+    for (const s of spans) {
+      const a = Math.max(s[0], end);
+      if (s[1] > a) { covered += Math.log(s[1] / a); end = s[1]; }
+    }
+    return Math.min(1, covered / Math.log(fMax / fMin));
   }
 
   // Predicted mode nearest to a measured frequency, with the miss in percent
@@ -197,5 +237,5 @@
   }
 
   return { ROOMS, speedOfSound, roomModes, estimateModeCount, modeType, noteName, sweepFreq, sweepRate, sweepReadingFreq,
-    findPeaks, strongestPeaks, nearestMode, matchMode, bandLevelDb };
+    findPeaks, strongestPeaks, nearestMode, matchMode, bandLevelDb, mergeClose, randomHitChance };
 });

@@ -29,6 +29,12 @@ Version 1 played thirty frequencies between 16 and 88 Hz at once. Small Bluetoot
 - On iPhones, turning the microphone on can make the tone quieter or move it to the earpiece. If that happens, turn the microphone off and judge by ear, or use the clap test.
 - The measured curve includes the speaker's and the microphone's own frequency response. Peaks are judged against the local trend for that reason.
 
+### Versions and updates
+The page shows its version at the bottom. The app keeps a complete copy of itself on the phone and runs from that copy, so it opens with no signal. When the phone is online and a newer version exists, the whole new set is downloaded together and the page reloads itself (or shows a "Load the new version" button if something is playing). A release needs the same new number in `BUILD` in `app.js` and `VERSION` in `sw.js`; a test checks that they match.
+
+### Reading the peak table
+A measured peak is shown as matching a listed mode only if it is within 1.5 %. Under the table the app says how often a random frequency would match by chance; with a crowded list that is often, so one match proves little. Trust peaks that return when the measurement is repeated, and several peaks that fit together.
+
 ## The model
 
 Rigid-walled rectangular room:

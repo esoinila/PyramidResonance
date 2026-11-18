@@ -5,9 +5,25 @@
     const M = window.Modes;
     const $ = (id) => document.getElementById(id);
 
+    // Must equal VERSION in sw.js (a test checks it). Change both for every release:
+    // the new sw.js is what makes phones fetch the new files, all at once.
+    const BUILD = '2.0.0';
+    const MATCH_TOL = 1.5;    // percent: how close a measured peak must be to a listed mode
+
     if ('serviceWorker' in navigator) {
+        const hadController = !!navigator.serviceWorker.controller;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+            if (!hadController) return;           // first install: this page is already the new version
+            let reloaded = false;
+            try { reloaded = sessionStorage.getItem('pyramid-res-reloaded') === BUILD; sessionStorage.setItem('pyramid-res-reloaded', BUILD); } catch (e) { /* ignore */ }
+            if (!reloaded && !voice && !micOn && !clapBusy) { location.reload(); return; }
+            $('updateNote').hidden = false;
+        });
         window.addEventListener('load', () => {
-            navigator.serviceWorker.register('./sw.js').catch((err) => console.log('Service worker registration failed', err));
+            navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then((reg) => {
+                // a home-screen app is often resumed, not relaunched: look for an update then too
+                document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
+            }).catch((err) => console.log('Service worker registration failed', err));
         });
     }
 
@@ -63,6 +79,10 @@
         }
         return m.type + ' ' + m.label;
     }
+    function describeRow(m) {
+        const all = [m].concat(m.also || []);
+        return all.slice(0, 2).map(describe).join(' + ') + (all.length > 2 ? ' +' + (all.length - 2) + ' more' : '');
+    }
     function noteText(f) {
         const n = M.noteName(f);
         return n.name + ' ' + (n.cents >= 0 ? '+' : '') + n.cents + '¢';
@@ -81,12 +101,14 @@
         }
         modes = warn ? [] : M.roomModes(d.L, d.W, d.H, c, settings.fMin, settings.fMax);
         const filtered = modes.filter((m) => settings.filter === 'all' || m.type === 'axial' || (settings.filter === 'tangential' && m.type === 'tangential'));
-        shown = filtered.slice(0, MAX_LISTED);
+        const merged = M.mergeClose(filtered);
+        shown = merged.slice(0, MAX_LISTED);
         $('roomWarn').textContent = warn;
         const r = M.ROOMS[settings.room];
         $('roomNote').textContent = (r ? r.note + ' ' : '') + 'Speed of sound ' + c.toFixed(1) + ' m/s. ' +
             modes.length + ' modes in range, ' + shown.length + ' listed' +
-            (filtered.length > shown.length ? ' (the lowest ' + MAX_LISTED + ' of ' + filtered.length + ')' : '') + '.';
+            (merged.length > shown.length ? ' (the lowest ' + MAX_LISTED + ' of ' + merged.length + ')' : '') +
+            (merged.length < filtered.length ? '. Modes that share a frequency are one row' : '') + '.';
         activeIdx = -1;
         lastIdx = -1;
         renderList();
@@ -105,7 +127,7 @@
             b.className = 'mode';
             const f = document.createElement('b'); f.textContent = m.f.toFixed(1) + ' Hz';
             const n = document.createElement('span'); n.textContent = noteText(m.f);
-            const t = document.createElement('span'); t.textContent = describe(m);
+            const t = document.createElement('span'); t.textContent = describeRow(m);
             b.append(f, n, t);
             b.addEventListener('click', () => playMode(i));
             host.appendChild(b);
@@ -146,6 +168,7 @@
     let wakeLock = null;
     let wakePending = false;
     let lastVoiceStopMs = -1e9;
+    let lastVoiceF = null;   // frequency of the tone that stopped last (null after a sweep)
 
     function setSessionType(type) {
         // Safari: lets Web Audio play with the silent switch on, and choose routing with the mic
@@ -204,6 +227,7 @@
         voice = null;
         if (v && ctx) {
             lastVoiceStopMs = performance.now();
+            lastVoiceF = v.kind === 'tone' ? v.f1 : null;
             const t = ctx.currentTime;
             try {
                 v.env.gain.cancelScheduledValues(t);
@@ -230,7 +254,7 @@
         const v = { osc, env, kind, f1, f2, t0: t, dur };
         osc.onended = () => {
             try { osc.disconnect(); env.disconnect(); } catch (e) { /* ignore */ }
-            if (voice === v) { voice = null; lastVoiceStopMs = performance.now(); onStopped(v); }
+            if (voice === v) { voice = null; lastVoiceStopMs = performance.now(); lastVoiceF = null; onStopped(v); }
         };
         osc.start(t);
         if (kind === 'sweep') {
@@ -248,6 +272,8 @@
         $('nowFreq').textContent = freqText;
         $('nowInfo').textContent = info;
     }
+    // Spoken by screen readers. Used for starts and stops only, never per sweep step.
+    function say(text) { $('say').textContent = text; }
 
     function setButtons() {
         const sweeping = !!(voice && voice.kind === 'sweep');
@@ -263,6 +289,7 @@
         releaseWake();
         if (v && v.kind === 'sweep') finishSweep();
         setNow('–', 'Nothing playing');
+        say('Stopped');
         setActive(-1);
         setButtons();
         drawChart();
@@ -272,6 +299,7 @@
         if (!shown.length || clapBusy) return;
         const idx = ((i % shown.length) + shown.length) % shown.length;
         const m = shown[idx];
+        lastIdx = idx;   // before the await, so quick taps step on
         try {
             await ensureCtx();
             if (clapBusy) return;
@@ -283,9 +311,9 @@
             return;
         }
         $('audioWarn').textContent = '';
-        lastIdx = idx;
         setActive(idx);
-        setNow(m.f.toFixed(1) + ' Hz', noteText(m.f) + ' · ' + describe(m));
+        setNow(m.f.toFixed(1) + ' Hz', noteText(m.f) + ' · ' + describeRow(m));
+        say(m.f.toFixed(1) + ' hertz');
         setButtons();
         drawChart();
     }
@@ -294,6 +322,7 @@
         const v = voice;
         stopVoice();
         if (v && v.kind === 'sweep') abortSweep();
+        recording = false;
         cancelClap();
         onStopped(null);
     }
@@ -341,6 +370,7 @@
             return;
         }
         $('audioWarn').textContent = '';
+        say('Sweep started');
         sweepTimer = setInterval(sweepTick, 50);
         setButtons();
     }
@@ -378,7 +408,8 @@
         abortSweep();
         const wasRecording = recording;
         recording = false;
-        if (wasRecording && curveKind === 'sweep' && curve.length > 10) showPeaks(M.findPeaks(curve, 4, 12));
+        if (wasRecording && curveKind === 'sweep' && curve.length > 10) showPeaks(M.findPeaks(curve, 4, 30));   // +-30 points is about +-12 %: wide enough for a broad peak
+        else if (wasRecording) showPeaks([]);
     }
 
     // ---------- Microphone ----------
@@ -391,6 +422,7 @@
     let meterTimer = null;
     let clapTimer = null;
     let clapBusy = false;
+    let clapRun = 0;          // identifies one recording, so a cancelled one cannot carry on
 
     async function toggleMic() {
         if (micBusy) return;
@@ -456,6 +488,12 @@
 
     function meterTick() {
         if (!micOn || !ctx) return;
+        if (ctx.state !== 'running') {
+            // the analyser returns its last frame for ever while paused: do not show it as live
+            $('meterBar').style.width = '0';
+            $('meterText').textContent = 'Audio is paused. Tap a tone, or turn the microphone off and on.';
+            return;
+        }
         const binHz = ctx.sampleRate / fine.fftSize;
         fine.getFloatFrequencyData(fineSpectrum);
         let db = null, label = 'loudest in range';
@@ -475,32 +513,69 @@
         $('meterText').textContent = db.toFixed(1) + ' dB ' + label;
     }
 
-    function cancelClap() {
+    function cancelClap(message) {
         if (!clapBusy) return;
+        clapRun++;
         clearInterval(clapTimer); clapTimer = null;
         clapBusy = false;
+        if (message) $('micWarn').textContent = message;
         setClapButton();
         setButtons();
     }
 
-    function recordClap() {
+    async function recordClap() {
         if (!micOn || clapBusy || micBusy) return;
+        if (!(settings.fMax > settings.fMin)) {
+            $('micWarn').textContent = 'Set "To Hz" higher than "From Hz" in the Room card first.';
+            return;
+        }
         if (voice) stopAll();
         clapBusy = true;
+        const run = ++clapRun;
+        $('micWarn').textContent = '';
+        setClapButton('Wait…');
         setButtons();
+        try {
+            await ensureCtx();   // audio may have been paused by a call or the lock screen
+        } catch (e) {
+            if (run === clapRun) cancelClap(e && e.message ? e.message : 'Audio could not start.');
+            return;
+        }
+        if (run !== clapRun || !micOn || !fine) { if (run === clapRun) cancelClap(); return; }
+
         const binHz = ctx.sampleRate / fine.fftSize;
+        const fastBinHz = ctx.sampleRate / fast.fftSize;
         const k0 = Math.max(1, Math.floor(settings.fMin / binHz));
         const k1 = Math.min(fineSpectrum.length - 1, Math.ceil(settings.fMax / binHz));
-        const hold = new Float32Array(k1 - k0 + 1).fill(-Infinity);
-        // Let any tone that was playing ring out and leave the analyser's window first
-        const startMs = Math.max(performance.now() + 900, lastVoiceStopMs + 2500);
-        const endMs = startMs + 4000;
-        setClapButton('Wait…');
+        const hold = new Float32Array(Math.max(1, k1 - k0 + 1)).fill(-Infinity);
+        // A tone that was just playing must ring out and leave the analyser's window first.
+        // A stone room can ring for seconds, so after the minimum wait keep waiting (up to
+        // 10 s) while the level at that tone's frequency is still falling.
+        const oldF = performance.now() - lastVoiceStopMs < 15000 ? lastVoiceF : null;
+        const minStart = Math.max(performance.now() + 900, lastVoiceStopMs + 2500);
+        const maxStart = Math.max(minStart, lastVoiceStopMs + 10000);
+        const levels = [];
+        let startMs = null;
         clapTimer = setInterval(() => {
             const now = performance.now();
             if (!micOn || !fine) { cancelClap(); return; }
-            if (now < startMs) return;
-            if (now < endMs) {
+            if (ctx.state !== 'running') { cancelClap('Audio was interrupted. Tap "Record a clap" again.'); return; }
+            if (startMs == null) {
+                let settled = true;
+                if (oldF != null) {
+                    fast.getFloatFrequencyData(fastSpectrum);
+                    const db = M.bandLevelDb(fastSpectrum, fastBinHz, oldF, 3);
+                    levels.push(db == null ? -200 : db);
+                    const n = levels.length;
+                    if (n >= 12) {
+                        const mean = (arr) => arr.reduce((x, y) => x + y, 0) / arr.length;
+                        settled = mean(levels.slice(n - 6)) >= mean(levels.slice(n - 12, n - 6)) - 1.5;
+                    } else settled = false;
+                }
+                if (now >= maxStart || (now >= minStart && settled)) startMs = now;
+                else return;
+            }
+            if (now < startMs + 4000) {
                 $('clap').textContent = 'Clap now…';
                 fine.getFloatFrequencyData(fineSpectrum);
                 for (let k = k0; k <= k1; k++) if (fineSpectrum[k] > hold[k - k0]) hold[k - k0] = fineSpectrum[k];
@@ -514,7 +589,9 @@
             disturbed = false;
             setClapButton();
             setButtons();
-            showPeaks(M.findPeaks(curve, 6, 14));
+            const peaks = M.findPeaks(curve, 6, 14);
+            if (oldF != null) peaks.forEach((p) => { if (Math.abs(p.f - oldF) / oldF * 100 <= MATCH_TOL) p.echo = true; });
+            showPeaks(peaks);
             drawChart();
         }, 60);
     }
@@ -525,31 +602,45 @@
         host.textContent = '';
         const note = (text) => { const p = document.createElement('p'); p.className = 'hint'; p.textContent = text; host.appendChild(p); };
         if (!peaks.length) {
-            note('No clear peaks found. Try more volume, a corner position, or a longer sweep.');
+            if (curveKind === 'sweep' && settings.fMax / settings.fMin < 1.25) {
+                note('No clear peaks found. This range is too narrow to tell a peak from its surroundings: widen "From Hz" and "To Hz" so the sweep covers more than the peak itself.');
+            } else {
+                note('No clear peaks found. Try more volume, a corner position, or a longer sweep.');
+            }
             return;
         }
+        let anyEdge = false, anyEcho = false;
         const table = document.createElement('table');
         const head = document.createElement('tr');
         ['Measured', 'Note', 'Nearest listed mode', 'Miss'].forEach((h) => { const th = document.createElement('th'); th.textContent = h; head.appendChild(th); });
         table.appendChild(head);
         M.strongestPeaks(peaks, 12).forEach((p) => {
-            const match = M.matchMode(shown, p.f, 3);
-            let nearest = 'none within 3 %', miss = '–';
-            if (match.mode && match.candidates > 3) nearest = match.candidates + ' modes within 3 %: too dense to tell';
+            const match = M.matchMode(shown, p.f, MATCH_TOL);
+            let nearest = 'none within ' + MATCH_TOL + ' %', miss = '–';
+            if (match.mode && match.candidates > 2) nearest = match.candidates + ' modes within ' + MATCH_TOL + ' %: too dense to tell';
             else if (match.mode) {
-                nearest = match.mode.f.toFixed(1) + ' Hz ' + describe(match.mode);
+                nearest = match.mode.f.toFixed(1) + ' Hz ' + describeRow(match.mode);
                 miss = (match.errorPct >= 0 ? '+' : '') + match.errorPct.toFixed(1) + ' %';
             }
+            let measured = p.f.toFixed(1) + ' Hz';
+            if (p.edge) { measured += ' (edge)'; anyEdge = true; }
+            if (p.echo) { measured += ' (old tone?)'; anyEcho = true; }
             const tr = document.createElement('tr');
-            [p.f.toFixed(1) + ' Hz', noteText(p.f), nearest, miss].forEach((c) => { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); });
+            [measured, noteText(p.f), nearest, miss].forEach((c) => { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); });
             table.appendChild(tr);
         });
         host.appendChild(table);
-        note('Compared with the ' + shown.length + ' modes listed under "Single tones". A peak near a listed mode is consistent with it, not proof of it.');
+        const chance = Math.round(100 * M.randomHitChance(shown, settings.fMin, settings.fMax, MATCH_TOL));
+        note('Compared with the ' + shown.length + ' modes listed under "Single tones". A frequency picked at random would land within ' +
+            MATCH_TOL + ' % of one of them about ' + chance + ' % of the time' +
+            (chance >= 40 ? ', so a single match means little. Look for several peaks that fit, and peaks that return when you repeat the measurement.' :
+                '. A peak near a listed mode is consistent with it, not proof of it.'));
+        if (anyEdge) note('"(edge)": at the very end of the range, so it may be a slope that continues outside it and not a peak.');
+        if (anyEcho) note('"(old tone?)": at the frequency of the tone played just before the clap. The room may still have been ringing from it. Wait longer and clap again to check.');
         if (curveKind === 'sweep') {
             // about +-0.15 s of unknown speaker delay, turned into a frequency error
             const pct = 100 * Math.log(settings.fMax / settings.fMin) / settings.sweepDur * 0.15;
-            note('Sweep frequencies are good to about ±' + (pct < 0.1 ? '0.1' : pct.toFixed(1)) + ' % because the speaker delay is not known exactly.' +
+            note('Sweep frequencies are good to about ±' + (pct < 0.1 ? '0.1' : pct.toFixed(1)) + ' % because the speaker delay is not known exactly. A strongly ringing room also answers a little late, which pushes sweep peaks slightly upward; the clap does not have that error.' +
                 (pct > 0.5 ? ' A longer sweep or a narrower range is more accurate.' : ''));
             if (disturbed) note('The volume was changed during this sweep, so levels before and after the change are not comparable.');
         }
@@ -563,6 +654,7 @@
             cv.width = Math.round(Wd * dpr);
             cv.height = Math.round(Hd * dpr);
         }
+        cv.dataset.points = String(curve.length);   // for tests
         const g = cv.getContext('2d');
         g.setTransform(dpr, 0, 0, dpr, 0, 0);
         const padL = 52, padR = 10, padT = 24, padB = 22;
@@ -582,6 +674,12 @@
             g.beginPath(); g.moveTo(x(f), padT); g.lineTo(x(f), Hd - padB); g.stroke();
             if (x(f) - lastLabelX >= 44) { g.fillText(f + ' Hz', Math.min(x(f), Wd - 22), Hd - padB / 2); lastLabelX = x(f); }
         });
+        if (lastLabelX < 0) {
+            // no round number falls inside a narrow range: label the two ends
+            g.textAlign = 'left'; g.fillText(f1 + ' Hz', padL, Hd - padB / 2);
+            g.textAlign = 'right'; g.fillText(f2 + ' Hz', Wd - padR, Hd - padB / 2);
+            g.textAlign = 'center';
+        }
         // predicted modes (the ones listed under "Single tones")
         shown.forEach((m) => {
             const axial = m.type === 'axial';
@@ -629,7 +727,7 @@
             const message = $('roomWarn').textContent;
             Object.assign(settings, before);
             recompute();
-            $('roomWarn').textContent = message + ' Kept the previous range.';
+            $('roomWarn').textContent = message + ' Kept the previous settings.';
         }
         save();
         syncInputs();
@@ -668,6 +766,8 @@
     });
     window.addEventListener('resize', () => drawChart());
 
+    $('build').textContent = 'Version ' + BUILD;
+    $('reload').addEventListener('click', () => location.reload());
     setSessionType('playback');
     syncInputs();
     if (!recompute()) {

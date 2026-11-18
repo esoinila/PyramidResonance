@@ -73,6 +73,7 @@
         .row > button { flex: 1; }
         .mt { margin-top: 10px; }
         .hint { color: var(--muted); font-size: .82rem; margin: 8px 0 0; }
+        .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
         .warn { color: var(--bad); font-size: .85rem; margin: 8px 0 0; min-height: 1.2em; }
 
         #now { text-align: center; padding: 8px 0 2px; }
@@ -106,6 +107,10 @@
     <main>
         <h1>Pyramid Resonance</h1>
         <p class="sub">Find the notes a stone room rings at</p>
+        <div class="card" id="updateNote" hidden>
+            <p class="hint" style="margin-top:0">A new version has been downloaded.</p>
+            <div class="row mt"><button id="reload">Load the new version</button></div>
+        </div>
 
         <div class="card">
             <h2>Room</h2>
@@ -132,7 +137,7 @@
         </div>
 
         <div class="card">
-            <div id="now" aria-live="polite" aria-atomic="true">
+            <div id="now">
                 <div id="nowFreq">–</div>
                 <div id="nowInfo">Nothing playing</div>
             </div>
@@ -141,6 +146,7 @@
                 <button id="stop" disabled>Stop</button>
             </div>
             <p class="warn" id="audioWarn"></p>
+            <p class="sr" id="say" aria-live="polite"></p>
         </div>
 
         <div class="card">
@@ -204,6 +210,7 @@
         </div>
 
         <p class="hint">Model: rigid rectangular room. Real rooms have openings, sloped ceilings and people in them, so expect measured peaks within a few percent of the prediction, not on it. The curve also contains your speaker's and microphone's own response.</p>
+        <p class="hint" id="build"></p>
     </main>
     <script src="modes.js"></script>
     <script src="app.js"></script>
