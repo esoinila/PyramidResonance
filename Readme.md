@@ -1,78 +1,77 @@
 # PyramidResonance
 
-A simple web application that generates and plays the calculated resonant frequencies of the Great Pyramid's King's Chamber using pure sine waves via the Web Audio API. This project is inspired by theories suggesting the chamber was designed with acoustic properties in mind, potentially for energy amplification or harmonic resonance with Earth's natural frequencies.
+A small web app for finding the notes a stone room rings at. It predicts the room modes of a rectangular chamber, plays them one at a time or as a slow sweep, and can listen with the phone's microphone to show which frequencies the room actually amplifies.
 
-## Description
+Presets cover the King's Chamber of the Great Pyramid and the burial chambers of Khafre and Menkaure. Any other room works too: enter its length, width and height.
 
-This app allows users to play a combination of resonant frequencies derived from the dimensions of the King's Chamber in the Great Pyramid of Giza. The frequencies are based on standard acoustic calculations for a rectangular enclosure, using measurements from W.M. Flinders Petrie and assuming a speed of sound of approximately 1126 ft/s (adjusted for typical pyramid conditions). These ideas draw from Christopher Dunn's work in *The Giza Power Plant: Technologies of Ancient Egypt*, where he proposes the pyramid functioned as an advanced energy device involving acoustic resonance.
+The idea comes from Christopher Dunn's *The Giza Power Plant*, which proposes that the King's Chamber was built with acoustic resonance in mind. The app takes no side on that; it only measures.
 
-The app plays all frequencies simultaneously as sine waves at low volume to avoid distortion. Low frequencies (e.g., below 20 Hz) may be felt as vibrations rather than heard, depending on your audio setup.
+## Using it
 
-Note: Some theories link these resonances to Earth's Schumann resonances (fundamental ~7.83 Hz, octaves like ~15.66 Hz), suggesting harmonic alignment for power generation or other purposes.
+1. Open `index.html` over https (GitHub Pages works) and add it to the home screen. After the first load it works offline.
+2. Pick the chamber, or choose "Custom room" and type the size in metres.
+3. Put the speaker in a corner. Stand in another corner.
+4. **Single tones:** step through the list. A resonance is a tone that is clearly louder than its neighbours.
+5. **Sweep:** glides from "From Hz" to "To Hz". With the microphone on, the level is plotted and the peaks are listed next to the nearest predicted mode.
+6. **Clap:** with the microphone on, press "Record a clap" and clap once. No speaker needed.
 
-## Frequencies
+No speaker at all? Hum a slow slide in pitch. The room answers when you cross a mode. In the King's Chamber the fourth height mode sits near 117 Hz (A♯2).
 
-The app calculates and plays resonant frequencies for the known chambers of the main Giza pyramids.
+### What a small speaker can do
 
-### Khufu (Great Pyramid - King's Chamber)
-16.39, 29.32, 32.79, 33.6, 36.66, 43.99, 46.37, 46.94, 49.18, 54.86, 57.26, 58.65, 59.11, 60.9, 65.57, 65.98, 67.19, 67.59, 69.16, 71.83, 73.31, 73.68, 74.76, 76.54, 78.96, 81.96, 83.26, 87.05, 87.97, 88.28 Hz
+Version 1 played thirty frequencies between 16 and 88 Hz at once. Small Bluetooth speakers produce almost nothing below about 60 Hz, so most of that list was silent, and thirty tones together hide a resonance. Version 2 defaults to 60–250 Hz and plays one tone at a time.
 
-### Khafre (Burial Chamber)
-12.11, 24.22, 25.02, 27.8, 34.12, 34.82, 36.21, 36.32, 41.84, 42.31, 44.01, 44.11, 48.43, 48.75, 49.84, 50.04, 51.49, 54.51, 55.6, 55.76, 59.24, 60.54, 60.57, 61.77, 61.84, 64.31, 65.23, 65.51, 68.24, 69.31, 69.49, 69.64, 70.63, 72.41, 72.69, 73.69, 73.86, 75.07, 76.04, 76.61, 77.31, 77.55, 78.54, 78.88, 81.26, 82.46, 83.34, 83.39, 83.68, 84.63, 85.49, 85.64, 85.94, 87.34, 88.02, 89.33, 90.1, 91.22, 92.09, 94.59, 95.63, 96.44, 97.5 Hz
+### Microphone notes
 
-### Menkaure (Burial Chamber)
-25.74, 48.96, 51.47, 55.31, 64.96, 69.87, 71.04, 77.21, 81.34, 82.88, 85.32, 91.42, 96.26, 97.91 Hz
+- The microphone needs https and your permission. Nothing is recorded or uploaded; the audio is analysed on the phone and discarded.
+- Sweep readings are shifted back by the analyser window and the speaker delay. Set "Sound comes from" to Bluetooth or Phone/cable so the right delay is used; a Bluetooth speaker's exact delay is unknown, so sweep peaks are good to a fraction of a percent, not better. The clap has no such error.
+- Not yet tested on a real iPhone: whether the tone stays on a Bluetooth speaker while the microphone is on.
+- On iPhones, turning the microphone on can make the tone quieter or move it to the earpiece. If that happens, turn the microphone off and judge by ear, or use the clap test.
+- The measured curve includes the speaker's and the microphone's own frequency response. Peaks are judged against the local trend for that reason.
 
-## Calculation Code
+### Versions and updates
+The page shows its version at the bottom. The app keeps a complete copy of itself on the phone and runs from that copy, so it opens with no signal. When the phone is online and a newer version exists, the whole new set is downloaded together and the page reloads itself (or shows a "Load the new version" button if something is playing). A release needs the same new number in `BUILD` in `app.js` and `VERSION` in `sw.js`; a test checks that they match.
 
-The frequencies are derived using the formula for resonant frequencies in a rectangular room:
+### Reading the peak table
+A measured peak is shown as matching a listed mode only if it is within 1.5 %. Under the table the app says how often a random frequency would match by chance; with a crowded list that is often, so one match proves little. Trust peaks that return when the measurement is repeated, and several peaks that fit together.
+
+## The model
+
+Rigid-walled rectangular room:
 
 $$
-f_{n_x, n_y, n_z} = \frac{v}{2} \sqrt{ \left( \frac{n_x}{L} \right)^2 + \left( \frac{n_y}{W} \right)^2 + \left( \frac{n_z}{H} \right)^2 }
+f_{n_x, n_y, n_z} = \frac{c}{2} \sqrt{ \left( \frac{n_x}{L} \right)^2 + \left( \frac{n_y}{W} \right)^2 + \left( \frac{n_z}{H} \right)^2 }
 $$
 
-Where:
-- \( v \) = speed of sound (~1126 ft/s)
-- \( L, W, H \) = dimensions of the chamber
-- \( n_x, n_y, n_z \) = mode integers (starting from 0, excluding all-zero)
+- `c` is the speed of sound, `331.3 * sqrt(1 + T/273.15)` m/s. At 20 °C that is 343.2 m/s (1126 ft/s).
+- Axial modes (one non-zero index) are the strongest, tangential next, oblique weakest.
+- Real chambers have doorways, shafts, a granite box and visitors. Expect measured peaks within a few percent of the prediction.
+- Khafre's chamber has a gabled ceiling and Menkaure's a vaulted one, so their height modes are rough.
 
-You can find the Python script used for these calculations in this repository: [`calculate_resonance.py`](calculate_resonance.py).
+King's Chamber dimensions are Petrie's 1883 means: 412.35 × 206.26 × 230.39 inches (10.474 × 5.239 × 5.852 m).
 
-```python
-import math
+Axial modes of the King's Chamber, 60–250 Hz at 20 °C:
 
-def calculate_resonant_frequencies(L, W, H, v=1126, max_mode=5, max_freq=100):
-    frequencies = []
-    for nx in range(0, max_mode+1):
-        for ny in range(0, max_mode+1):
-            for nz in range(0, max_mode+1):
-                if nx == ny == nz == 0:
-                    continue
-                f = (v / 2) * math.sqrt((nx / L)**2 + (ny / W)**2 + (nz / H)**2)
-                if f <= max_freq:
-                    frequencies.append(round(f, 2))
-    frequencies.sort()
-    return list(set(frequencies))
-```
+| Direction | Frequencies (Hz) |
+|---|---|
+| Length | 65.5, 81.9, 98.3, 114.7, 131.1, 147.5, 163.8, 180.2, 196.6, 213.0, 229.4, 245.8 |
+| Width | 65.5, 98.3, 131.0, 163.8, 196.5, 229.3 |
+| Height | 88.0, 117.3, 146.6, 176.0, 205.3, 234.6 |
 
-## Usage
+## Files
 
-1. Open `index.html` in a modern web browser (e.g., Chrome, Firefox).
-2. Click "Play Resonance" to start all frequencies.
-3. Click "Stop" to halt playback.
+- `index.html`, `app.js`: the interface, audio and measurement
+- `modes.js`: the maths, shared by the browser and the tests
+- `sw.js`, `manifest.json`, `icon.svg`: offline support and home-screen install
+- `calculate_resonance.py`: the same calculation in Python, for checking by hand
+- `test/modes.test.js`: unit tests, run with `node --test test/*.js`
+- `test/smoke.py`: browser test of the whole app with a simulated room and microphone, run with `python3 test/smoke.py` (needs Playwright and Chrome)
 
-For mobile use, bookmark the page or host it on a server (e.g., Azure App Service) for easy access during travel. Test on headphones or speakers—adjust gain in `app.js` if clipping occurs.
+## Sources
 
-No installation required; it's pure HTML/JavaScript.
-
-## Sources and Inspiration
-
-- **Christopher Dunn's Theories**: From *The Giza Power Plant* (1998), proposing the pyramid as an acoustic energy device. See [official site](https://gizapower.com/) and [book on Amazon](https://www.amazon.com/Giza-Power-Plant-Technologies-Ancient/dp/1879181738).
-- **Acoustic Analysis**: Discussions on pyramid acoustics, including resonances around 121 Hz and lower harmonics. See [this Substack article](https://somercanales.substack.com/p/the-acoustics-of-the-great-pyramid) for a breakdown.
-- **Petrie's Measurements**: Exact dimensions from W.M. Flinders Petrie's *The Pyramids and Temples of Gizeh* (1883). Full text available [here (PDF)](https://gizamedia.rc.fas.harvard.edu/images/MFA-images/Giza/GizaImage/full/library/petrie_gizeh.pdf). Key averages: Length 412.35 inches, Width 206.26 inches, Height 230.39 inches.
-- **Schumann Resonance Connection**: Pyramid resonances may align with Earth's electromagnetic resonances. Fundamental Schumann ~7.83 Hz; octaves include ~15.66 Hz (close to the chamber's fundamental ~16 Hz). See [Wikipedia on Schumann resonances](https://en.wikipedia.org/wiki/Schumann_resonances).
-
-This project is for educational purposes. 
+- Christopher Dunn, *The Giza Power Plant* (1998), [gizapower.com](https://gizapower.com/)
+- W. M. Flinders Petrie, *The Pyramids and Temples of Gizeh* (1883), [PDF](https://gizamedia.rc.fas.harvard.edu/images/MFA-images/Giza/GizaImage/full/library/petrie_gizeh.pdf)
+- [The acoustics of the Great Pyramid](https://somercanales.substack.com/p/the-acoustics-of-the-great-pyramid), a discussion of reported resonances near 121 Hz
 
 ## License
 
