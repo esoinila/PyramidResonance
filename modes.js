@@ -103,13 +103,15 @@
 
   /*
    * Peaks in a measured curve. points: [{ f, db }] sorted by f.
-   * A peak is a local maximum that stands at least minProminence dB above the
-   * median of its neighbourhood (+-window points). The median removes the slow
-   * slope of the speaker and microphone response.
+   * A peak is a local maximum whose prominence is at least minProminence dB.
+   * Prominence is how far the curve must drop from the peak before it can rise
+   * to anything higher: the peak's height above the deeper-sided saddle. Unlike
+   * a comparison with the neighbourhood average, this finds broad humps as well
+   * as narrow spikes, and ignores a slow overall slope. (The third argument, a
+   * window, is no longer used.)
    */
-  function findPeaks(points, minProminence, window) {
+  function findPeaks(points, minProminence) {
     const prom = minProminence == null ? 4 : minProminence;
-    const w = window == null ? 12 : window;
     const n = points.length;
     const peaks = [];
     for (let i = 0; i < n; i++) {
@@ -118,13 +120,14 @@
       const left = i === 0 ? -Infinity : points[i - 1].db;
       const right = i === n - 1 ? -Infinity : points[i + 1].db;
       if (n < 3 || !(p.db > left && p.db >= right)) continue;
-      const a = Math.max(0, i - w), b = Math.min(n, i + w + 1);
-      const near = [];
-      for (let k = a; k < b; k++) near.push(points[k].db);
-      near.sort((x, y) => x - y);
-      const median = near[Math.floor(near.length / 2)];
+      // lowest point on each side before the curve rises above this peak (or ends)
+      let lMin = Infinity, rMin = Infinity;
+      for (let k = i - 1; k >= 0 && points[k].db <= p.db; k--) if (points[k].db < lMin) lMin = points[k].db;
+      for (let k = i + 1; k < n && points[k].db <= p.db; k++) if (points[k].db < rMin) rMin = points[k].db;
+      const base = i === 0 ? rMin : i === n - 1 ? lMin : Math.max(lMin, rMin);
+      const prominence = p.db - base;
       // edge: the curve was cut off here, so this may be a slope and not a true peak
-      if (p.db - median >= prom) peaks.push({ f: p.f, db: p.db, prominence: p.db - median, edge: i === 0 || i === n - 1 });
+      if (prominence >= prom) peaks.push({ f: p.f, db: p.db, prominence, edge: i === 0 || i === n - 1 });
     }
     // keep the strongest of any peaks closer than 3 % in frequency
     peaks.sort((x, y) => y.prominence - x.prominence);

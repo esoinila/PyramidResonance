@@ -8,7 +8,7 @@
 
     // Must equal VERSION in sw.js (a test checks it). Change both for every release:
     // the new sw.js is what makes phones fetch the new files, all at once.
-    const BUILD = '2.1.0';
+    const BUILD = '2.1.1';
     const MATCH_TOL = 1.5;    // percent: how close a measured peak must be to a listed mode
 
     if ('serviceWorker' in navigator) {
@@ -425,7 +425,7 @@
         recording = false;
         if (wasRecording && curveKind === 'sweep' && curve.length > 10) {
             curveState = 'done';
-            showPeaks(M.findPeaks(curve, 4, 30));   // +-30 points is about +-12 %: wide enough for a broad peak
+            showPeaks(M.findPeaks(curve, 4));
         } else if (wasRecording) showPeaks([]);
     }
 
@@ -608,7 +608,7 @@
             disturbed = false;
             setClapButton();
             setButtons();
-            const peaks = M.findPeaks(curve, 6, 14);
+            const peaks = M.findPeaks(curve, 4);
             if (oldF != null) peaks.forEach((p) => { if (Math.abs(p.f - oldF) / oldF * 100 <= MATCH_TOL) p.echo = true; });
             showPeaks(peaks);
             drawChart();

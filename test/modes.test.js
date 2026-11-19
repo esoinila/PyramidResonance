@@ -282,3 +282,21 @@ test('fitSize shrinks a photo to 1600 on its long side and never enlarges', () =
   assert.deepStrictEqual(Rec.fitSize(800, 600, 1600), { width: 800, height: 600 });
   assert.deepStrictEqual(Rec.fitSize(0, 600, 1600), { width: 0, height: 0 });
 });
+
+// ---------- a real measurement: clap in a bike cellar, 19 Nov 2026 (app 2.1.0 found "no clear peaks") ----------
+test('findPeaks finds the broad humps of a real clap spectrum', () => {
+  const rec = require('./data/bike-cellar-clap.json');
+  const curve = rec.curve.map((p) => ({ f: p[0], db: p[1] }));
+  const peaks = M.findPeaks(curve, 4);
+  const inner = peaks.filter((p) => !p.edge).map((p) => Math.round(p.f));
+  assert.deepStrictEqual(inner, [91, 116, 167]);
+  assert.strictEqual(peaks.length, 3, 'the cut-off rise at the low end is not called a peak');
+  close(peaks.find((p) => Math.round(p.f) === 91).prominence, 11.1, 0.05);
+  // the shallow humps appear at a lower threshold, and nothing else does
+  assert.deepStrictEqual(M.findPeaks(curve, 3).filter((p) => !p.edge).map((p) => Math.round(p.f)), [91, 116, 167, 193]);
+});
+
+test('findPeaks ignores a slow slope and small ripple', () => {
+  const slope = Array.from({ length: 100 }, (_, i) => ({ f: 60 + i, db: -40 - i * 0.3 + (i % 2 ? 0.5 : 0) }));
+  assert.deepStrictEqual(M.findPeaks(slope, 4).filter((p) => !p.edge), []);
+});
