@@ -452,7 +452,7 @@ async def main():
             return names
         await page.click('#checkUpdate')
         try:
-            await page.wait_for_function("updateMsg.textContent.includes('failed part way')", timeout=15000); said = True
+            await page.wait_for_function("updateMsg.textContent.includes('could not be installed yet')", timeout=15000); said = True
         except Exception:
             said = False
         check(said, '"Check for update" finds the new version and says when its download fails', await page.evaluate("updateMsg.textContent"))
@@ -467,10 +467,14 @@ async def main():
         new_app = open(os.path.join(site, 'app.js')).read()
         open(os.path.join(site, 'app.js'), 'w').write(open(os.path.join(ROOT, 'app.js')).read())
         later = os.path.getmtime(os.path.join(site, 'app.js')) + 30; os.utime(os.path.join(site, 'app.js'), (later, later))
-        await page.evaluate("navigator.serviceWorker.getRegistration().then(r => r.update()).catch(() => 0)")
-        await page.wait_for_timeout(1500)
+        fate = await page.evaluate("""navigator.serviceWorker.getRegistration().then(r => r.update().then(() => new Promise((done) => {
+            const w = r.installing || r.waiting;
+            if (!w) return done('no new worker');
+            const look = () => { if (w.state === 'redundant' || w.state === 'activated') done(w.state); };
+            w.addEventListener('statechange', look); look(); setTimeout(() => done('timeout in state ' + w.state), 10000);
+        })))""")
         names = await caches_settle('pyramid-res-' + v1.split()[1])
-        check(names == 'pyramid-res-' + v1.split()[1], 'a new sw.js with the old app.js is not installed', names)
+        check(fate == 'redundant' and names == 'pyramid-res-' + v1.split()[1], 'a new sw.js with the old app.js is not installed', fate + ' ' + names)
         open(os.path.join(site, 'app.js'), 'w').write(new_app)
         later += 30; os.utime(os.path.join(site, 'app.js'), (later, later))
 
@@ -499,13 +503,25 @@ async def main():
             await page.wait_for_timeout(250)
         check(dead, '(test setup) the broken release took over and its page does not start', await page.evaluate("build.textContent"))
         await page.wait_for_timeout(16000)
-        publish('9.9.11', good_app)
+        # ... and so must one that parses but stops with an error while starting
+        publish('9.9.11', good_app.replace("const R = window.Records;", "const R = window.Records; if (R) throw new Error('boom at start');", 1))
+        await page.reload()
+        dead = False
+        for _ in range(80):
+            try:
+                if await page.evaluate("document.readyState === 'complete' && document.getElementById('build').textContent === '' && caches.keys().then(k => k.join() === 'pyramid-res-9.9.11')"): dead = True; break
+            except Exception:
+                pass
+            await page.wait_for_timeout(250)
+        check(dead, 'a release that does not parse is replaced by the next one after one reopening (here: by one that stops while starting)')
+        await page.wait_for_timeout(16000)
+        publish('9.9.12', good_app)
         await page.reload()                    # what opening the app again does: the browser itself looks for a new sw.js
-        check(await build_is('Version 9.9.11', 20000), 'a release that does not start is replaced by the next one after one reopening', await page.evaluate("build.textContent"))
-        errors[:] = [e for e in errors if 'regular expression' not in e and 'Invalid' not in e]
+        check(await build_is('Version 9.9.12', 20000), 'a release that stops while starting is replaced by the next one after one reopening', await page.evaluate("build.textContent"))
+        errors[:] = [e for e in errors if 'regular expression' not in e and 'Invalid' not in e and 'boom at start' not in e]
         await ctx.set_offline(True)
         await page.reload()
-        check(await page.evaluate("build.textContent") == 'Version 9.9.11' and await page.evaluate("modeList.children.length") > 10, 'and the new version then works offline')
+        check(await page.evaluate("build.textContent") == 'Version 9.9.12' and await page.evaluate("modeList.children.length") > 10, 'and the new version then works offline')
         check(not errors, 'no page errors (offline and update)', errors)
         srv2.shutdown(); shutil.rmtree(site, ignore_errors=True)
         await browser.close()

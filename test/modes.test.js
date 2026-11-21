@@ -245,6 +245,11 @@ test('scripts/release.js stamps only the declarations and leaves working code', 
   assert.ok(/^\d{4}-\d\d-\d\dT\d\d:\d\d:00Z$/.test(when(app)) && when(app) === when(sw));
   for (const f of ['app.js', 'sw.js']) assert.doesNotThrow(() => new (require('node:vm').Script)(fs.readFileSync(path.join(tmp, f), 'utf8')), f + ' still parses');
   assert.notStrictEqual(spawnSync('node', [path.join(root, 'scripts', 'release.js'), 'banana', '--root', tmp, '--stamp-only']).status, 0);
+  // the same or a lower number is refused, and nothing is written
+  const before = fs.readFileSync(path.join(tmp, 'app.js'), 'utf8');
+  for (const v of ['7.8.9', '7.8.8', '6.99.99']) assert.notStrictEqual(spawnSync('node', [path.join(root, 'scripts', 'release.js'), v, '--root', tmp, '--stamp-only']).status, 0, v);
+  assert.strictEqual(fs.readFileSync(path.join(tmp, 'app.js'), 'utf8'), before);
+  assert.strictEqual(spawnSync('node', [path.join(root, 'scripts', 'release.js'), '7.10.0', '--root', tmp, '--stamp-only']).status, 0, '7.10.0 is higher than 7.8.9');
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 

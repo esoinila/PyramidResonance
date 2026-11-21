@@ -258,11 +258,12 @@
             // busy: set by app.js; true while a tone plays or the microphone is on.
             var state = window.PyramidUpdate = { reg: null, ready: false, busy: null };
             sw.addEventListener('controllerchange', function () {
-                if (!hadController) return;           // first install: this page is already the new version
+                if (!hadController) { hadController = true; return; }   // first install: this page is already the new version
                 state.ready = true;
                 var last = 0;
                 try { last = Number(sessionStorage.getItem('pyramid-res-reloaded-at')) || 0; } catch (e) { /* ignore */ }
-                var busy = typeof state.busy === 'function' && state.busy();
+                var busy = false;       // an app.js that failed to start has nothing to lose: not busy
+                try { busy = typeof state.busy === 'function' && state.busy(); } catch (e) { busy = false; }
                 if (!busy && Date.now() - last > 15000) {     // the pause stops any reload loop
                     try { sessionStorage.setItem('pyramid-res-reloaded-at', String(Date.now())); } catch (e) { /* ignore */ }
                     location.reload();
