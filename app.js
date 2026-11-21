@@ -8,9 +8,11 @@
 
     // Must equal VERSION in sw.js (a test checks it). Change both for every release:
     // the new sw.js is what makes phones fetch the new files, all at once.
-    const BUILD = '2.2.0';
+    const BUILD = '2.2.1';
+    const RELEASED = '2026-11-21T17:50:00Z';   // when this version was published; the same value is in sw.js
     const MATCH_TOL = 1.5;    // percent: how close a measured peak must be to a listed mode
 
+    let swReg = null;
     if ('serviceWorker' in navigator) {
         const hadController = !!navigator.serviceWorker.controller;
         navigator.serviceWorker.addEventListener('controllerchange', () => {
@@ -22,6 +24,7 @@
         });
         window.addEventListener('load', () => {
             navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then((reg) => {
+                swReg = reg;
                 // a home-screen app is often resumed, not relaunched: look for an update then too
                 document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
             }).catch((err) => console.log('Service worker registration failed', err));
@@ -1170,6 +1173,44 @@
         renderSaved();
     }
 
+    // ---------- Version check ----------
+    // Date and time in the phone's own time zone, e.g. "21.11.2026 20:00"
+    function formatWhen(iso) {
+        const t = new Date(iso);
+        if (!Number.isFinite(t.getTime())) return 'at an unknown time';
+        const p = (n) => String(n).padStart(2, '0');
+        return t.getDate() + '.' + (t.getMonth() + 1) + '.' + t.getFullYear() + ' ' + p(t.getHours()) + ':' + p(t.getMinutes());
+    }
+    // Asks the server which version is published now, past every cache. sw.js is never in
+    // the offline cache, so this request always goes to the network.
+    async function checkUpdate() {
+        const msg = (text) => { $('updateMsg').textContent = text; };
+        const button = $('checkUpdate');
+        button.disabled = true;
+        msg('Checking…');
+        try {
+            const res = await Promise.race([
+                fetch('./sw.js?check=' + Date.now(), { cache: 'no-store' }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000)),
+            ]);
+            if (!res.ok) throw new Error('status ' + res.status);
+            const text = await res.text();
+            const v = text.match(/const VERSION = '([^']+)'/), r = text.match(/const RELEASED = '2026-11-21T17:50:00Z']+)'/);
+            if (!v) throw new Error('unreadable');
+            if (v[1] === BUILD) {
+                msg('This is the newest version (checked ' + formatWhen(new Date().toISOString()) + ').');
+            } else {
+                msg('Version ' + v[1] + (r ? ', published ' + formatWhen(r[1]) + ',' : '') + ' is available. Downloading it now; this page reloads when it is ready' +
+                    (voice || micOn || clapBusy ? ', or shows a button at the top while something is playing or the microphone is on.' : '.'));
+                if (swReg) swReg.update().catch(() => msg('Version ' + v[1] + ' is available, but the download failed. Try again with a better connection.'));
+                else msg('Version ' + v[1] + ' is available. Close the app completely and open it again to get it.');
+            }
+        } catch (e) {
+            msg('Could not check: no connection to the server. You have version ' + BUILD + '.');
+        }
+        button.disabled = false;
+    }
+
     // ---------- Wiring ----------
     // Apply a settings change. A change that would need too many modes is undone.
     function change(mutate) {
@@ -1225,6 +1266,8 @@
     window.addEventListener('resize', () => drawChart());
 
     $('build').textContent = 'Version ' + BUILD;
+    $('released').textContent = ', published ' + formatWhen(RELEASED);
+    $('checkUpdate').addEventListener('click', checkUpdate);
     $('reload').addEventListener('click', () => location.reload());
     setSessionType('playback');
     syncInputs();

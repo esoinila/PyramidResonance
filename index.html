@@ -239,7 +239,12 @@
         </div>
 
         <p class="hint">Model: rigid rectangular room. Real rooms have openings, sloped ceilings and people in them, so expect measured peaks within a few percent of the prediction, not on it. The curve also contains your speaker's and microphone's own response.</p>
-        <p class="hint" id="build"></p>
+        <div class="card">
+            <h2>Version</h2>
+            <p class="hint" style="margin-top:0"><span id="build"></span><span id="released"></span></p>
+            <div class="row mt"><button id="checkUpdate" class="ghost">Check for update</button></div>
+            <p class="hint" id="updateMsg" aria-live="polite"></p>
+        </div>
     </main>
     <script src="modes.js"></script>
     <script src="records.js"></script>
