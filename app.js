@@ -1192,7 +1192,7 @@
         $('dotMeasure').hidden = !(micOn || clapBusy || sweeping);
         // Stop, the frequency and the level stay in reach on every tab while something sounds
         $('strip').hidden = !voice;
-        if (voice) $('stripText').textContent = $('nowFreq').textContent + (micOn ? ' · ' + $('meterText').textContent : '');
+        if (voice) $('stripText').textContent = micOn && /dB/.test($('meterText').textContent) ? $('meterText').textContent : $('nowFreq').textContent;   // with the microphone on: the level at this tone
         // a warning written on a tab that is not open is repeated here, so nothing fails silently
         const notes = [$('audioWarn').textContent, settings.tab === 'measure' ? '' : $('micWarn').textContent].filter(Boolean).join(' ');
         if ($('notice').textContent !== notes) $('notice').textContent = notes;
