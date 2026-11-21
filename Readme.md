@@ -39,7 +39,7 @@ After a clap or a measured sweep, "Save this measurement" stores the spectrum on
 - The location needs "Precise Location" allowed for the page. Without it the measurement is still saved.
 
 ### Versions and updates
-The page shows its version at the bottom. The app keeps a complete copy of itself on the phone and runs from that copy, so it opens with no signal. When the phone is online and a newer version exists, the whole new set is downloaded together and the page reloads itself (or shows a "Load the new version" button if something is playing). A release needs the same new number in `BUILD` in `app.js` and `VERSION` in `sw.js`; a test checks that they match.
+The page shows its version and when it was published at the bottom, with a "Check for update" button that asks the server which version is current. The app keeps a complete copy of itself on the phone and runs from that copy, so it opens with no signal. When the phone is online and a newer version exists, the whole new set is downloaded together and the page reloads itself (or shows a "Load the new version" button if something is playing). A release needs the same new number in `BUILD` in `app.js` and `VERSION` in `sw.js`, and the same publication time in `RELEASED` in both; a test checks that they match.
 
 ### Reading the peak table
 A measured peak is shown as matching a listed mode only if it is within 1.5 %. Under the table the app says how often a random frequency would match by chance; with a crowded list that is often, so one match proves little. Trust peaks that return when the measurement is repeated, and several peaks that fit together.

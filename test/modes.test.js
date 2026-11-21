@@ -204,6 +204,9 @@ test('app.js BUILD and sw.js VERSION are the same, and every cached file exists'
   const build = app.match(/const BUILD = '([^']+)'/)[1];
   const version = sw.match(/const VERSION = '([^']+)'/)[1];
   assert.strictEqual(build, version);
+  const relApp = app.match(/const RELEASED = '([^']+)'/)[1], relSw = sw.match(/const RELEASED = '([^']+)'/)[1];
+  assert.strictEqual(relApp, relSw, 'RELEASED must be the same in app.js and sw.js');
+  assert.ok(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(relApp) && Number.isFinite(new Date(relApp).getTime()), 'RELEASED is a UTC time');
   const assets = sw.match(/const ASSETS = \[([^\]]+)\]/)[1].match(/'[^']+'/g).map((s) => s.slice(1, -1));
   assert.ok(assets.length >= 9);
   for (const a of assets) if (a !== './') assert.ok(fs.existsSync(path.join(root, a)), a);

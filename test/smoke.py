@@ -412,7 +412,14 @@ async def main():
         await page.evaluate("navigator.serviceWorker.ready")
         await page.wait_for_function("navigator.serviceWorker.controller !== null", timeout=10000)
         v1 = await page.evaluate("build.textContent")
+        check(re.search(r'published \d+\.\d+\.\d{4} \d\d:\d\d', await page.evaluate("released.textContent")) is not None, 'the page shows when its version was published', await page.evaluate("released.textContent"))
+        await page.click('#checkUpdate')
+        await page.wait_for_function("updateMsg.textContent.includes('newest version')", timeout=10000)
+        check(True, '"Check for update" says when the app is up to date')
         await ctx.set_offline(True)
+        await page.click('#checkUpdate')
+        await page.wait_for_function("updateMsg.textContent.includes('Could not check')", timeout=12000)
+        check(await page.evaluate("!checkUpdate.disabled"), 'and says so when there is no connection')
         await page.reload()
         check(await page.evaluate("modeList.children.length") > 10 and await page.evaluate("build.textContent") == v1, 'the app opens with no network after one visit', v1)
         await page.goto(url2.replace('index.html', ''))
@@ -427,6 +434,8 @@ async def main():
             later = os.path.getmtime(path) + 10; os.utime(path, (later, later))
         bump('app.js', r"const BUILD = '[^']+'", "const BUILD = '9.9.9'")
         bump('sw.js', r"const VERSION = '[^']+'", "const VERSION = '9.9.9'")
+        bump('sw.js', r"const RELEASED = '[^']+'", "const RELEASED = '2027-03-10T12:00:00Z'")
+        bump('app.js', r"const RELEASED = '[^']+'", "const RELEASED = '2027-03-10T12:00:00Z'")
         os.rename(os.path.join(site, 'modes.js'), os.path.join(site, 'modes.js.away'))
         await ctx.set_offline(False)
         await page.evaluate("navigator.serviceWorker.getRegistration().then(r => r.update()).catch(() => 0)")
@@ -435,6 +444,9 @@ async def main():
         check(await page.evaluate("caches.keys().then(k => k.join())") == 'pyramid-res-' + v1.split()[1], 'the failed update left no second cache behind', await page.evaluate("caches.keys().then(k => k.join())"))
         check(await page.evaluate("build.textContent") == v1 and await page.evaluate("modeList.children.length") > 10, 'a half-downloaded update leaves the old version running', await page.evaluate("build.textContent"))
         os.rename(os.path.join(site, 'modes.js.away'), os.path.join(site, 'modes.js'))
+        await page.click('#checkUpdate')
+        await page.wait_for_function("updateMsg.textContent.includes('Version 9.9.9') || document.getElementById('build').textContent === 'Version 9.9.9'", timeout=10000)
+        check(True, '"Check for update" finds the new version and starts the download')
         # now the update can complete: an idle page reloads itself into it
         ok = False
         for _ in range(10):
