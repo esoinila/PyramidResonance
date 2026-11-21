@@ -97,7 +97,19 @@ navigator.canShare = (d) => !!(d && d.files && d.files.length);
 navigator.share = async (d) => {
   if (window.__SHARE_REFUSE_ONCE) { window.__SHARE_REFUSE_ONCE = false; const e = new Error('no gesture'); e.name = 'NotAllowedError'; throw e; }
   const files = [];
-  for (const f of d.files) files.push({ name: f.name, type: f.type, size: f.size, text: f.type === 'application/json' ? await f.text() : null });
+  for (const f of d.files) {
+    const o = { name: f.name, type: f.type, size: f.size, text: f.type === 'application/json' ? await f.text() : null };
+    if (f.type === 'audio/wav') {
+      const v = new DataView(await f.arrayBuffer());
+      const x = new Float32Array((v.byteLength - 58) / 4); for (let i = 0; i < x.length; i++) x[i] = v.getFloat32(58 + i * 4, true);
+      let peak = 0; x.forEach((s) => { if (Math.abs(s) > peak) peak = Math.abs(s); });
+      const at = x.findIndex((s) => Math.abs(s) > peak / 4);   // the first clap (the test claps twice)
+      const rms = (a, b) => { let q = 0; for (let i = a; i < b; i++) q += x[i] * x[i]; return Math.sqrt(q / Math.max(1, b - a)); };
+      o.wav = { format: v.getUint16(20, true), channels: v.getUint16(22, true), rate: v.getUint32(24, true), samples: x.length, peak, at,
+        before: rms(0, Math.max(1, at - 2400)), after: rms(at, Math.min(x.length, at + 4800)) };
+    }
+    files.push(o);
+  }
   window.__shares.push({ title: d.title, text: d.text, files });
 };
 0;
@@ -274,6 +286,7 @@ async def main():
         # ---- saving the measurement, with location, photo and sending
         import json, base64
         check(await page.evaluate("!saveBox.hidden && !saveBtn.disabled"), 'a finished clap can be saved')
+        check(await page.evaluate("!keepAudioRow.hidden && keepAudio.checked && /^[34]\\.\\d s, [01]\\.\\d MB$/.test(keepAudioSize.textContent)"), 'and offers to keep its sound', await page.evaluate("keepAudioSize.textContent"))
         await page.evaluate(SHARE_MOCK)
         await page.fill('#saveNote', 'Test room, niche 3')
         await page.click('#saveBtn')
@@ -284,6 +297,7 @@ async def main():
         check('-71.98171' in loc and '±7 m' in loc and 'improving' not in loc, 'the location is stored with its accuracy', loc)
         check((await page.evaluate("document.querySelector('#savedList .rec a').href")).startswith('https://maps.google.com/?q=-13.509812,-71.981712'), 'with a map link')
         check('Test room, niche 3' in await page.evaluate("document.querySelector('#savedList .rec b').textContent"), 'the note is shown')
+        check('sound' in await page.evaluate("document.querySelector('#savedList .rec').textContent"), 'the list says the sound was kept')
 
         # a second measurement, then look at the first again
         await page.click('#mic'); await page.wait_for_timeout(900)
@@ -294,6 +308,7 @@ async def main():
             if 'now' in (await page.evaluate("clap.textContent")).lower(): break
         await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
         check(await page.evaluate("!saveBox.hidden && !saveBtn.disabled"), 'a new measurement can be saved again')
+        await page.uncheck('#keepAudio')
         await page.click('#saveBtn')
         await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 2", timeout=5000)
         check(await page.evaluate("!shareAll.hidden"), 'two saved measurements offer "send all"')
@@ -326,10 +341,16 @@ async def main():
         await page.click('#savedList .rec:last-child [data-role=share]'); await page.wait_for_timeout(500)
         shares = await page.evaluate("window.__shares")
         names = [f['name'] for f in shares[0]['files']] if shares else []
-        check(len(shares) == 1 and len(names) == 3 and names[0].endswith('-test-room-niche-3.json') and names[1].endswith('-chart.png') and names[2].endswith('-photo.jpg'), 'sending one measurement gives data, chart and photo', names)
+        check(len(shares) == 1 and len(names) == 4 and names[0].endswith('-test-room-niche-3.json') and names[1].endswith('-chart.png') and names[2].endswith('-photo.jpg')
+              and names[3].endswith('-sound.wav'), 'sending one measurement gives data, chart, photo and sound', names)
+        wav = shares[0]['files'][3].get('wav') if len(names) == 4 else None
+        rate = await page.evaluate("window.__ctx.sampleRate")
+        check(bool(wav) and wav['format'] == 3 and wav['channels'] == 1 and wav['rate'] == rate and 3.5 * rate < wav['samples'] <= 4.3 * rate
+              and shares[0]['files'][3]['size'] == 58 + 4 * wav['samples'], 'the sound is about 4 s of mono float WAV at the microphone rate', wav)
+        check(bool(wav) and wav['peak'] > 0.01 and wav['at'] > 0.1 * rate and wav['after'] > 20 * wav['before'], 'and it holds the clap: quiet before, loud at the clap', wav)
         data = json.loads(shares[0]['files'][0]['text']) if shares else {}
         check(data.get('schema') == 'pyramid-resonance-measurement/1' and len(data.get('curve', [])) > 50 and abs(data['location']['lat'] + 13.509812) < 1e-6
-              and data['location']['accuracyM'] == 7 and data['note'] == 'Test room, niche 3' and data['photo']['width'] == 1600 and data['kind'] == 'clap'
+              and data['location']['accuracyM'] == 7 and data['note'] == 'Test room, niche 3' and data['photo']['width'] == 1600 and data['kind'] == 'clap' and data['audio']['samples'] == (wav or {}).get('samples') and data['audio']['format'] == 'float32'
               and any(abs(p['f'] - F0) < 3 for p in data['peaks']), 'the data file holds the spectrum, peaks, place and note', {k: data.get(k) for k in ('time', 'location', 'peaks')})
         check('Location: -13.50981' in shares[0]['text'] and 'maps.google.com' in shares[0]['text'], 'and the message text names the place')
         check(shares[0]['files'][1]['size'] > 3000 and shares[0]['files'][2]['size'] > 3000, 'chart and photo files are not empty')
@@ -337,6 +358,10 @@ async def main():
         shares = await page.evaluate("window.__shares")
         everything = json.loads(shares[-1]['files'][0]['text'])
         check(len(shares) == 2 and everything['count'] == 2 and everything['measurements'][0]['note'] == 'Test room, niche 3', '"send all" gives one file with both, oldest first')
+        check(everything['measurements'][1]['audio'] is None, 'a measurement saved with "Keep the sound" unticked has none')
+        await page.click('#savedList .rec:first-child [data-role=share]'); await page.wait_for_timeout(500)
+        shares = await page.evaluate("window.__shares")
+        check([f['name'].rsplit('.', 1)[1] for f in shares[-1]['files']] == ['json', 'png'], 'and sends no sound file', [f['name'] for f in shares[-1]['files']])
 
         # still there after closing and reopening the app
         await page.reload()

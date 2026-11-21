@@ -82,6 +82,7 @@
       peaks,
       curve,                    // [[Hz, dB], ...]; dB is relative, not calibrated
       photo: null,              // { name, type, width, height, takenTime } once a photo is attached
+      audio: null,              // { type, format, sampleRate, channels, samples, durationS } when the raw sound was kept
       app: String(input.app || ''),
     };
   }
@@ -154,5 +155,36 @@
     return { width: Math.max(1, Math.round(width * k)), height: Math.max(1, Math.round(height * k)) };
   }
 
-  return { SCHEMA, cleanLocation, betterFix, makeRecord, localParts, fileBase, formatLocation, mapsUrl, peakSummary, shareText, exportAll, fitSize };
+  /*
+   * Raw sound as a WAV file: mono, 32-bit float, exactly the samples the microphone gave.
+   * samples: Float32Array (or array of numbers). Returns an ArrayBuffer.
+   */
+  function encodeWav(samples, sampleRate) {
+    const n = samples.length, rate = Math.round(sampleRate);
+    const buf = new ArrayBuffer(58 + n * 4);
+    const v = new DataView(buf);
+    const text = (at, s) => { for (let i = 0; i < s.length; i++) v.setUint8(at + i, s.charCodeAt(i)); };
+    text(0, 'RIFF'); v.setUint32(4, 50 + n * 4, true); text(8, 'WAVE');
+    text(12, 'fmt '); v.setUint32(16, 18, true);
+    v.setUint16(20, 3, true);            // 3 = IEEE float
+    v.setUint16(22, 1, true);            // mono
+    v.setUint32(24, rate, true);
+    v.setUint32(28, rate * 4, true);     // bytes per second
+    v.setUint16(32, 4, true);            // bytes per sample
+    v.setUint16(34, 32, true);           // bits per sample
+    v.setUint16(36, 0, true);            // no extension
+    text(38, 'fact'); v.setUint32(42, 4, true); v.setUint32(46, n, true);
+    text(50, 'data'); v.setUint32(54, n * 4, true);
+    for (let i = 0; i < n; i++) v.setFloat32(58 + i * 4, Number.isFinite(samples[i]) ? samples[i] : 0, true);
+    return buf;
+  }
+
+  // What a record says about its sound file
+  function audioInfo(sampleCount, sampleRate) {
+    const rate = Math.round(sampleRate);
+    if (!(sampleCount > 0 && rate > 0)) return null;
+    return { type: 'audio/wav', format: 'float32', sampleRate: rate, channels: 1, samples: sampleCount, durationS: round(sampleCount / rate, 3) };
+  }
+
+  return { SCHEMA, encodeWav, audioInfo, cleanLocation, betterFix, makeRecord, localParts, fileBase, formatLocation, mapsUrl, peakSummary, shareText, exportAll, fitSize };
 });

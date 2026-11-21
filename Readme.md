@@ -23,7 +23,7 @@ Version 1 played thirty frequencies between 16 and 88 Hz at once. Small Bluetoot
 
 ### Microphone notes
 
-- The microphone needs https and your permission. Nothing is recorded or uploaded; the audio is analysed on the phone and discarded.
+- The microphone needs https and your permission. Nothing is uploaded. The sound is analysed on the phone and discarded, with one exception: the 4 seconds of a clap are kept if you save that measurement with "Keep the sound" ticked.
 - Sweep readings are shifted back by the analyser window and the speaker delay. Set "Sound comes from" to Bluetooth or Phone/cable so the right delay is used; a Bluetooth speaker's exact delay is unknown, so sweep peaks are good to a fraction of a percent, not better. The clap has no such error.
 - Not yet tested on a real iPhone: whether the tone stays on a Bluetooth speaker while the microphone is on.
 - On iPhones, turning the microphone on can make the tone quieter or move it to the earpiece. If that happens, turn the microphone off and judge by ear, or use the clap test.
@@ -33,8 +33,9 @@ Version 1 played thirty frequencies between 16 and 88 Hz at once. Small Bluetoot
 After a clap or a measured sweep, "Save this measurement" stores the spectrum on the phone with the time, an optional note and the location (the best fix of the first 15 seconds, with its accuracy). Each saved measurement can be shown again, given a photo, sent, or deleted.
 
 - **Photo**: taken or picked through the phone's own chooser and kept inside the app at 1600 px. A web page cannot write to the photo gallery; the photo travels with the measurement when it is sent.
-- **Send**: opens the share sheet with three files: the data (`.json`), the chart (`.png`) and the photo (`.jpg`). Mail, Files, AirDrop or any other app can take them. "Send all as one file" gives one `.json` with every measurement, without photos.
-- **Data format**: `schema: pyramid-resonance-measurement/1`, with `time` (UTC) and `tzOffsetMin`, `location` (`lat`, `lon`, `accuracyM`, `altitudeM`), `fMin`/`fMax`, `peaks` and `curve` as `[Hz, dB]` pairs. The dB values are relative, not calibrated.
+- **Sound**: a saved clap keeps its raw sound unless "Keep the sound" is unticked: the 4 seconds of the "Clap now" window, mono, exactly as the microphone gave it (32-bit float WAV at the phone's sample rate, about 0.8 MB). The on-screen spectrum only covers "From Hz" to "To Hz"; the sound file holds everything, for analysis later on a computer. Sweeps do not keep their sound.
+- **Send**: opens the share sheet with up to four files: the data (`.json`), the chart (`.png`), the photo (`.jpg`) and the sound (`.wav`). Mail, Files, AirDrop or any other app can take them. "Send all as one file" gives one `.json` with every measurement, without photos or sound.
+- **Data format**: `schema: pyramid-resonance-measurement/1`, with `time` (UTC) and `tzOffsetMin`, `location` (`lat`, `lon`, `accuracyM`, `altitudeM`), `fMin`/`fMax`, `peaks` and `curve` as `[Hz, dB]` pairs. The dB values are relative, not calibrated. `audio` is `null`, or describes the sound file sent beside it (`sampleRate`, `samples`, `durationS`, `format: float32`).
 - The location needs "Precise Location" allowed for the page. Without it the measurement is still saved.
 
 ### Versions and updates

@@ -300,3 +300,25 @@ test('findPeaks ignores a slow slope and small ripple', () => {
   const slope = Array.from({ length: 100 }, (_, i) => ({ f: 60 + i, db: -40 - i * 0.3 + (i % 2 ? 0.5 : 0) }));
   assert.deepStrictEqual(M.findPeaks(slope, 4).filter((p) => !p.edge), []);
 });
+
+test('encodeWav writes a mono float WAV that holds the samples exactly', () => {
+  const x = Float32Array.from([0, 0.5, -0.25, 1, -1, 1e-6]);
+  const buf = Rec.encodeWav(x, 48000);
+  const v = new DataView(buf);
+  const tag = (at) => String.fromCharCode(v.getUint8(at), v.getUint8(at + 1), v.getUint8(at + 2), v.getUint8(at + 3));
+  assert.strictEqual(buf.byteLength, 58 + x.length * 4);
+  assert.strictEqual(tag(0) + tag(8) + tag(12) + tag(38) + tag(50), 'RIFFWAVEfmt factdata');
+  assert.strictEqual(v.getUint32(4, true), buf.byteLength - 8);
+  assert.deepStrictEqual([v.getUint16(20, true), v.getUint16(22, true), v.getUint32(24, true), v.getUint32(28, true), v.getUint16(32, true), v.getUint16(34, true)],
+    [3, 1, 48000, 192000, 4, 32]);
+  assert.strictEqual(v.getUint32(46, true), x.length);
+  assert.strictEqual(v.getUint32(54, true), x.length * 4);
+  x.forEach((s, i) => assert.strictEqual(v.getFloat32(58 + i * 4, true), s));
+  assert.strictEqual(new DataView(Rec.encodeWav([NaN, 2], 44100)).getFloat32(58, true), 0, 'a broken sample becomes silence');
+});
+
+test('audioInfo describes the sound file, and a record starts without one', () => {
+  assert.deepStrictEqual(Rec.audioInfo(192000, 48000), { type: 'audio/wav', format: 'float32', sampleRate: 48000, channels: 1, samples: 192000, durationS: 4 });
+  assert.strictEqual(Rec.audioInfo(0, 48000), null);
+  assert.strictEqual(Rec.makeRecord({}).audio, null);
+});
