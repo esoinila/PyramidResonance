@@ -73,6 +73,20 @@ INIT = r"""
 """.replace('%F0%', str(F0))
 
 failures = []
+def use_tabs(page):
+    """The page has tabs. Before acting on a control, go to its tab the way a person would: by tapping the tab button."""
+    async def go(selector):
+        await page.evaluate("""(sel) => { const el = document.querySelector(sel); const panel = el && el.closest('.tab');
+            if (panel && panel.hidden) document.getElementById('tabBtn-' + panel.id.slice(4)).click(); }""", selector)
+    def wrap(name):
+        real = getattr(page, name)
+        async def call(selector, *a, **k):
+            await go(selector)
+            return await real(selector, *a, **k)
+        setattr(page, name, call)
+    for name in ('click', 'fill', 'select_option', 'uncheck', 'check', 'dispatch_event'):
+        wrap(name)
+
 def check(ok, what, detail=''):
     print(('ok   ' if ok else 'FAIL ') + what + (('  ' + str(detail)) if detail != '' else ''))
     if not ok: failures.append(what)
@@ -122,6 +136,7 @@ async def new_page(browser, url, pre='', geo='grant'):
     errors = []
     page.on('pageerror', lambda e: errors.append(str(e)))
     page.on('console', lambda m: errors.append(m.text) if m.type == 'error' else None)
+    use_tabs(page)
     await page.add_init_script(pre + INIT)
     await page.goto(url)
     return page, errors
@@ -407,6 +422,7 @@ async def main():
         url2 = 'http://127.0.0.1:%d/index.html' % srv2.server_address[1]
         ctx = await browser.new_context(viewport={'width': 390, 'height': 844})
         page = await ctx.new_page()
+        use_tabs(page)
         errors = []
         page.on('pageerror', lambda e: errors.append(str(e)))
         await page.goto(url2)

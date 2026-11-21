@@ -20,9 +20,9 @@
     // ---------- Settings ----------
     const MAX_MODES = 6000;   // refuse ranges that would compute more than this
     const MAX_LISTED = 400;   // buttons in the tone list
-    const DEFAULTS = { room: 'khufu', L: 5, W: 4, H: 2.5, temp: 20, fMin: 60, fMax: 250, volume: 0.5, filter: 'axial', sweepDur: 60, speaker: 'bt' };
+    const DEFAULTS = { room: 'khufu', L: 5, W: 4, H: 2.5, temp: 20, fMin: 60, fMax: 250, volume: 0.5, filter: 'axial', sweepDur: 60, speaker: 'bt', tab: 'measure' };
     const LIMITS = { L: [0.5, 100], W: [0.5, 100], H: [0.5, 100], temp: [-20, 50], fMin: [10, 2000], fMax: [20, 4000], volume: [0, 1] };
-    const CHOICES = { room: ['khufu', 'khafre', 'menkaure', 'custom'], filter: ['axial', 'tangential', 'all'], sweepDur: [30, 60, 120], speaker: ['bt', 'direct'] };
+    const CHOICES = { room: ['khufu', 'khafre', 'menkaure', 'custom'], filter: ['axial', 'tangential', 'all'], sweepDur: [30, 60, 120], speaker: ['bt', 'direct'], tab: ['measure', 'play', 'saved', 'setup'] };
     const settings = Object.assign({}, DEFAULTS);
 
     // Force every setting into its allowed range, whatever was typed or stored
@@ -99,6 +99,10 @@
             modes.length + ' modes in range, ' + shown.length + ' listed' +
             (merged.length > shown.length ? ' (the lowest ' + MAX_LISTED + ' of ' + merged.length + ')' : '') +
             (merged.length < filtered.length ? '. Modes that share a frequency are one row' : '') + '.';
+        // the room is chosen on another tab: say which one these tones and this range belong to
+        const roomName = $('room').options[Math.max(0, CHOICES.room.indexOf(settings.room))].textContent;
+        const line = 'Room: ' + (settings.room === 'custom' ? d.L + ' × ' + d.W + ' × ' + d.H + ' m' : roomName) + ', ' + settings.fMin + '–' + settings.fMax + ' Hz. Change it in Setup.';
+        document.querySelectorAll('.roomLine').forEach((el) => { el.textContent = line; });
         activeIdx = -1;
         lastIdx = -1;
         renderList();
@@ -1002,6 +1006,7 @@
             host.appendChild(table);
         } else note('No clear peaks in this measurement.');
         note('This is a saved measurement' + (rec.location ? ' from ' + R.formatLocation(rec.location) : '') + '. A new clap or sweep replaces it on screen; the saved copy stays in the list.');
+        showTab('measure');     // the chart lives there
         drawChart();
         if ($('chartTitle').scrollIntoView) $('chartTitle').scrollIntoView({ block: 'start', behavior: 'smooth' });
     }
@@ -1159,6 +1164,32 @@
         renderSaved();
     }
 
+    // ---------- Tabs ----------
+    // Four sections of this one page. Switching shows and hides them and loads nothing,
+    // so it works the same with no network. Sound and microphone keep running across tabs.
+    function showTab(name, byUser) {
+        if (!CHOICES.tab.includes(name)) name = DEFAULTS.tab;
+        const changed = settings.tab !== name;
+        settings.tab = name;
+        if (byUser) save();
+        CHOICES.tab.forEach((t) => {
+            const on = t === name, button = $('tabBtn-' + t);
+            $('tab-' + t).hidden = !on;
+            button.setAttribute('aria-selected', on ? 'true' : 'false');
+            button.tabIndex = on ? 0 : -1;
+        });
+        // the "now playing" card with volume and Stop is needed on both sound tabs: it moves with you
+        if (name === 'measure') $('nowSlotMeasure').appendChild($('nowCard'));
+        if (name === 'play') $('nowSlotPlay').appendChild($('nowCard'));
+        if (name === 'measure') drawChart();    // a hidden canvas has no size: draw now that it shows
+        if (byUser && changed) window.scrollTo(0, 0);
+    }
+    // marks on the tab buttons, so that a tone or an open microphone is never out of sight
+    function tabMarks() {
+        $('dotPlay').hidden = !voice;
+        $('dotMeasure').hidden = !(micOn || clapBusy);
+    }
+
     // ---------- Version check ----------
     // Date and time in the phone's own time zone, e.g. "21.11.2026 20:00"
     function formatWhen(iso) {
@@ -1290,6 +1321,20 @@
         if (document.hidden && (voice || clapBusy)) stopAll();
     });
     window.addEventListener('resize', () => drawChart());
+
+    CHOICES.tab.forEach((t, i) => {
+        $('tabBtn-' + t).addEventListener('click', () => showTab(t, true));
+        // arrow keys move between tabs, as a tab list should
+        $('tabBtn-' + t).addEventListener('keydown', (e) => {
+            const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+            if (!step) return;
+            const next = CHOICES.tab[(i + step + CHOICES.tab.length) % CHOICES.tab.length];
+            showTab(next, true);
+            $('tabBtn-' + next).focus();
+        });
+    });
+    showTab(settings.tab);
+    setInterval(tabMarks, 400);
 
     $('build').textContent = 'Version ' + BUILD;
     $('released').textContent = ', published ' + formatWhen(RELEASED);
