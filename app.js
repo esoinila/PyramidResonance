@@ -8,8 +8,8 @@
 
     // Must equal VERSION in sw.js (a test checks it). Change both for every release:
     // the new sw.js is what makes phones fetch the new files, all at once.
-    const BUILD = '2.2.3';
-    const RELEASED = '2026-11-21T18:31:00Z';   // when this version was published; the same value is in sw.js
+    const BUILD = '2.3.0';
+    const RELEASED = '2026-11-21T19:04:00Z';   // when this version was published; the same value is in sw.js
     const MATCH_TOL = 1.5;    // percent: how close a measured peak must be to a listed mode
 
     // Registering the service worker and reloading into a new version is done by the small
@@ -20,9 +20,9 @@
     // ---------- Settings ----------
     const MAX_MODES = 6000;   // refuse ranges that would compute more than this
     const MAX_LISTED = 400;   // buttons in the tone list
-    const DEFAULTS = { room: 'khufu', L: 5, W: 4, H: 2.5, temp: 20, fMin: 60, fMax: 250, volume: 0.5, filter: 'axial', sweepDur: 60, speaker: 'bt' };
+    const DEFAULTS = { room: 'khufu', L: 5, W: 4, H: 2.5, temp: 20, fMin: 60, fMax: 250, volume: 0.5, filter: 'axial', sweepDur: 60, speaker: 'bt', tab: 'measure' };
     const LIMITS = { L: [0.5, 100], W: [0.5, 100], H: [0.5, 100], temp: [-20, 50], fMin: [10, 2000], fMax: [20, 4000], volume: [0, 1] };
-    const CHOICES = { room: ['khufu', 'khafre', 'menkaure', 'custom'], filter: ['axial', 'tangential', 'all'], sweepDur: [30, 60, 120], speaker: ['bt', 'direct'] };
+    const CHOICES = { room: ['khufu', 'khafre', 'menkaure', 'custom'], filter: ['axial', 'tangential', 'all'], sweepDur: [30, 60, 120], speaker: ['bt', 'direct'], tab: ['measure', 'play', 'saved', 'setup'] };
     const settings = Object.assign({}, DEFAULTS);
 
     // Force every setting into its allowed range, whatever was typed or stored
@@ -99,6 +99,10 @@
             modes.length + ' modes in range, ' + shown.length + ' listed' +
             (merged.length > shown.length ? ' (the lowest ' + MAX_LISTED + ' of ' + merged.length + ')' : '') +
             (merged.length < filtered.length ? '. Modes that share a frequency are one row' : '') + '.';
+        // the room is chosen on another tab: say which one these tones and this range belong to
+        const roomName = $('room').options[Math.max(0, CHOICES.room.indexOf(settings.room))].textContent;
+        const line = 'Room: ' + (settings.room === 'custom' ? d.L + ' × ' + d.W + ' × ' + d.H + ' m' : roomName) + ', ' + settings.fMin + '–' + settings.fMax + ' Hz. Change it in Setup.';
+        document.querySelectorAll('.roomLine').forEach((el) => { el.textContent = line; });
         activeIdx = -1;
         lastIdx = -1;
         renderList();
@@ -130,7 +134,10 @@
         if (idx >= 0 && kids[idx]) {
             kids[idx].classList.add('active');
             kids[idx].setAttribute('aria-current', 'true');
-            if (kids[idx].scrollIntoView) kids[idx].scrollIntoView({ block: 'nearest' });
+            // bring the row into view inside the list only: the page itself must not move under the finger
+            const list = $('modeList'), row = kids[idx], top = row.offsetTop - list.offsetTop;
+            if (top < list.scrollTop) list.scrollTop = top;
+            else if (top + row.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = top + row.offsetHeight - list.clientHeight;
         }
     }
 
@@ -354,7 +361,7 @@
         if (clapBusy) return;
         if (voice && voice.kind === 'sweep') { stopAll(); return; }
         if (!(settings.fMax > settings.fMin)) {
-            $('audioWarn').textContent = 'Set "To Hz" higher than "From Hz" in the Room card first.';
+            $('audioWarn').textContent = 'Set "To Hz" higher than "From Hz" on the Setup tab first.';
             return;
         }
         leaveViewing();
@@ -604,7 +611,7 @@
     async function recordClap() {
         if (!micOn || clapBusy || micBusy) return;
         if (!(settings.fMax > settings.fMin)) {
-            $('micWarn').textContent = 'Set "To Hz" higher than "From Hz" in the Room card first.';
+            $('micWarn').textContent = 'Set "To Hz" higher than "From Hz" on the Setup tab first.';
             return;
         }
         if (voice) stopAll();
@@ -975,7 +982,7 @@
             return;
         }
         saved.unshift(rec);
-        $('saveMsg').textContent = 'Saved. It is in the list below, where you can add a photo or send it.';
+        $('saveMsg').textContent = 'Saved. It is on the Saved tab, where you can add a photo or send it.';
         $('saveNote').value = '';
         renderSaved();
         // ask the browser not to clear this data when the phone runs low on space
@@ -1001,8 +1008,10 @@
             });
             host.appendChild(table);
         } else note('No clear peaks in this measurement.');
-        note('This is a saved measurement' + (rec.location ? ' from ' + R.formatLocation(rec.location) : '') + '. A new clap or sweep replaces it on screen; the saved copy stays in the list.');
+        note('This is a saved measurement' + (rec.location ? ' from ' + R.formatLocation(rec.location) : '') + '. A new clap or sweep replaces it on screen; the saved copy stays on the Saved tab.');
+        showTab('measure');     // the chart lives there
         drawChart();
+        $('chartTitle').style.scrollMarginTop = ($('top').offsetHeight + 12) + 'px';   // clear of the sticky bar, however tall it is now
         if ($('chartTitle').scrollIntoView) $('chartTitle').scrollIntoView({ block: 'start', behavior: 'smooth' });
     }
 
@@ -1159,6 +1168,44 @@
         renderSaved();
     }
 
+    // ---------- Tabs ----------
+    // Four sections of this one page. Switching shows and hides them and loads nothing,
+    // so it works the same with no network. Sound and microphone keep running across tabs.
+    function showTab(name, byUser) {
+        if (!CHOICES.tab.includes(name)) name = DEFAULTS.tab;
+        const changed = settings.tab !== name;
+        if (byUser && !changed) return;     // tapping the open tab again must not disturb anything on it
+        settings.tab = name;
+        if (byUser) save();
+        CHOICES.tab.forEach((t) => {
+            const on = t === name, button = $('tabBtn-' + t);
+            $('tab-' + t).hidden = !on;
+            button.setAttribute('aria-selected', on ? 'true' : 'false');
+            button.tabIndex = on ? 0 : -1;
+        });
+        // the "now playing" card with volume and Stop is needed on both sound tabs: it moves with you
+        if (name === 'measure') $('nowSlotMeasure').appendChild($('nowCard'));
+        if (name === 'play') $('nowSlotPlay').appendChild($('nowCard'));
+        if (name === 'measure') drawChart();    // a hidden canvas has no size: draw now that it shows
+        tabMarks();     // at once, so the top bar never changes height a moment after the switch
+        if (byUser && changed) window.scrollTo(0, 0);
+    }
+    // marks on the tab buttons, so that a tone or an open microphone is never out of sight
+    function tabMarks() {
+        const sweeping = !!voice && voice.kind === 'sweep';
+        $('dotPlay').hidden = !voice || sweeping;
+        $('dotMeasure').hidden = !(micOn || clapBusy || sweeping);
+        // Stop, the frequency and the level stay in reach on every tab while something sounds
+        $('stripStop').disabled = !voice;
+        // with the microphone on, the level at the playing tone is shown next to it (the line is always there: nothing jumps)
+        const level = voice && micOn && /dB/.test($('meterText').textContent) ? 'Microphone: ' + $('meterText').textContent : '';
+        if ($('nowLevel').textContent !== level) $('nowLevel').textContent = level;
+        // a warning written on a tab that is not open is repeated here, so nothing fails silently
+        const notes = [settings.tab === 'play' ? '' : $('audioWarn').textContent, settings.tab === 'measure' ? '' : $('micWarn').textContent].filter(Boolean).join(' ');
+        if ($('notice').textContent !== notes) $('notice').textContent = notes;
+        $('notice').hidden = !notes;
+    }
+
     // ---------- Version check ----------
     // Date and time in the phone's own time zone, e.g. "21.11.2026 20:00"
     function formatWhen(iso) {
@@ -1243,6 +1290,8 @@
         const before = Object.assign({}, settings);
         mutate();
         sanitize(settings);
+        // a complaint about the old settings is out of date now
+        ['audioWarn', 'micWarn'].forEach((id) => { if ($(id).textContent.includes('Setup tab')) $(id).textContent = ''; });
         if (voice || clapBusy) stopAll();
         rawAudio = null; curve = []; curveKind = ''; curveState = 'none'; viewing = null; recording = false; $('peaks').textContent = '';
         if (!recompute()) {
@@ -1278,6 +1327,9 @@
     $('prev').addEventListener('click', () => playMode(lastIdx < 0 ? shown.length - 1 : lastIdx - 1));
     $('next').addEventListener('click', () => playMode(lastIdx + 1));
     $('stop').addEventListener('click', stopAll);
+    $('stripStop').addEventListener('click', stopAll);
+    // a warning in the top bar goes away when tapped
+    $('notice').addEventListener('click', () => { $('audioWarn').textContent = ''; $('micWarn').textContent = ''; tabMarks(); });
     $('sweep').addEventListener('click', toggleSweep);
     $('mic').addEventListener('click', toggleMic);
     $('clap').addEventListener('click', recordClap);
@@ -1290,6 +1342,22 @@
         if (document.hidden && (voice || clapBusy)) stopAll();
     });
     window.addEventListener('resize', () => drawChart());
+
+    CHOICES.tab.forEach((t, i) => {
+        $('tabBtn-' + t).addEventListener('click', () => showTab(t, true));
+        // arrow keys move between tabs, as a tab list should
+        $('tabBtn-' + t).addEventListener('keydown', (e) => {
+            const last = CHOICES.tab.length - 1;
+            const to = e.key === 'ArrowRight' ? (i + 1) % (last + 1) : e.key === 'ArrowLeft' ? (i + last) % (last + 1) : e.key === 'Home' ? 0 : e.key === 'End' ? last : -1;
+            if (to < 0 || to === i) return;
+            e.preventDefault();
+            const next = CHOICES.tab[to];
+            showTab(next, true);
+            $('tabBtn-' + next).focus();
+        });
+    });
+    showTab(settings.tab);
+    setInterval(tabMarks, 400);
 
     $('build').textContent = 'Version ' + BUILD;
     $('released').textContent = ', published ' + formatWhen(RELEASED);

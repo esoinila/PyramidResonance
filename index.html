@@ -79,6 +79,18 @@
         .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
         .warn { color: var(--bad); font-size: .85rem; margin: 8px 0 0; min-height: 1.2em; }
 
+        #top { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 6px 0 8px; margin-top: 6px; }
+        #tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+        #tabs button { padding: 10px 2px; min-height: 44px; font-size: .95rem; background: transparent; color: var(--muted); border: 1px solid var(--line); }
+        #tabs button[aria-selected="true"] { color: #000; background: var(--gold); border-color: var(--gold); font-weight: 700; }
+        #tabs .dot { color: var(--bad); }
+        #tabs button[aria-selected="true"] .dot { color: #7a0000; }
+        #bar { display: flex; gap: 6px; }
+        #tabs { flex: 1; min-width: 0; }
+        #stripStop { flex: none; width: 48px; min-height: 44px; padding: 0; font-size: 1.1rem; }
+        #notice { margin: 8px 0 0; min-height: 0; }
+        #nowLevel { color: var(--gold); font-size: .9rem; min-height: 1.3em; font-variant-numeric: tabular-nums; }
+
         #now { text-align: center; padding: 8px 0 2px; }
         #nowFreq { font-size: 2.2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
         #nowInfo { color: var(--muted); font-size: .9rem; min-height: 1.3em; }
@@ -123,6 +135,126 @@
             <div class="row mt"><button id="reload">Load the new version</button></div>
         </div>
 
+        <div id="top">
+            <div id="bar">
+                <div id="tabs" role="tablist" aria-label="Sections">
+                    <button role="tab" id="tabBtn-measure" data-tab="measure" aria-controls="tab-measure">Measure<span id="dotMeasure" hidden><span class="dot" aria-hidden="true"> ●</span><span class="sr"> (microphone or sweep on)</span></span></button>
+                    <button role="tab" id="tabBtn-play" data-tab="play" aria-controls="tab-play">Play<span id="dotPlay" hidden><span class="dot" aria-hidden="true"> ♪</span><span class="sr"> (a tone is playing)</span></span></button>
+                    <button role="tab" id="tabBtn-saved" data-tab="saved" aria-controls="tab-saved">Saved</button>
+                    <button role="tab" id="tabBtn-setup" data-tab="setup" aria-controls="tab-setup">Setup</button>
+                </div>
+                <!-- Always in reach, on every tab. It is always there (greyed when silent), so nothing moves when a tone starts. -->
+                <button id="stripStop" aria-label="Stop the sound" disabled>■</button>
+            </div>
+            <p class="warn" id="notice" role="status" hidden></p>
+        </div>
+        <p class="sr" id="say" aria-live="polite"></p>
+        <!-- All four sections are in this one page; switching only shows and hides them, so it never needs a network. -->
+
+        <section class="tab" id="tab-measure" role="tabpanel" aria-labelledby="tabBtn-measure">
+        <div class="card">
+            <h2>Microphone</h2>
+            <div class="row">
+                <button id="mic" class="ghost">Turn microphone on</button>
+                <button id="clap" class="ghost" disabled>Record a clap (4 s)</button>
+            </div>
+            <div id="meter"><div id="meterBar"></div></div>
+            <div id="meterText">Microphone off</div>
+            <p class="hint">Easiest check: turn the microphone on, stop any tone, and record one sharp clap. The room rings at its own notes and no speaker is needed.</p>
+            <p class="hint">Nothing is sent anywhere. The sound of a clap is kept only if you save that measurement with "Keep the sound" ticked; everything else is analysed and discarded. On an iPhone, turning the microphone on can move the sound from a Bluetooth speaker to the phone itself. If the tone gets quiet, turn the microphone off and judge by ear, or use the clap.</p>
+            <p class="warn" id="micWarn"></p>
+        </div>
+
+        <div class="card">
+            <h2 id="chartTitle">Measurement</h2>
+            <canvas id="chart" role="img" aria-label="Measured level against frequency with predicted room modes"></canvas>
+            <p class="hint" id="chartHint">Run a sweep or record a clap with the microphone on. Gold line: measured level. Ticks along the top: the predicted modes of the room chosen in Setup (long ticks are axial).</p>
+            <div id="peaks"></div>
+            <div id="saveBox" hidden>
+                <label class="mt">Place or note (optional)
+                    <input type="text" id="saveNote" maxlength="120" autocomplete="off" placeholder="e.g. stairwell, 2nd floor">
+                </label>
+                <label class="mt check" id="keepAudioRow" hidden><input type="checkbox" id="keepAudio" checked><span>Keep the sound of the clap for later analysis (<span id="keepAudioSize"></span>)</span></label>
+                <div class="row mt"><button id="saveBtn">Save this measurement</button></div>
+                <p class="hint" id="saveMsg"></p>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Sweep</h2>
+            <p class="hint roomLine" style="margin-top:0"></p>
+            <div class="grid2 mt">
+                <label>Duration
+                    <select id="sweepDur">
+                        <option value="30">30 s</option>
+                        <option value="60">60 s</option>
+                        <option value="120">120 s</option>
+                    </select>
+                </label>
+                <label>Sound comes from
+                    <select id="speaker">
+                        <option value="bt">Bluetooth</option>
+                        <option value="direct">Phone or cable</option>
+                    </select>
+                </label>
+            </div>
+            <div class="row mt">
+                <button id="sweep">Start sweep</button>
+            </div>
+            <p class="hint">Glides slowly from "From Hz" to "To Hz" (both in Setup). With the microphone on, the level is plotted in the chart above. The speaker choice corrects for the delay a Bluetooth speaker adds.</p>
+        </div>
+
+        <div id="nowSlotMeasure"></div>
+        </section>
+
+        <section class="tab" id="tab-play" role="tabpanel" aria-labelledby="tabBtn-play" hidden>
+        <div id="nowSlotPlay">
+        <div class="card" id="nowCard">
+            <div id="now">
+                <div id="nowFreq">–</div>
+                <div id="nowInfo">Nothing playing</div>
+                <div id="nowLevel"></div>
+            </div>
+            <label class="mt">Volume <input type="range" id="volume" min="0" max="1" step="0.01"></label>
+            <div class="row mt">
+                <button id="stop" disabled>Stop</button>
+            </div>
+            <p class="warn" id="audioWarn"></p>
+        </div>
+        </div>
+
+        <div class="card">
+            <h2>Single tones</h2>
+            <p class="hint roomLine" style="margin-top:0"></p>
+            <label class="mt">Which modes
+                <select id="modeFilter">
+                    <option value="axial">Axial only (strongest)</option>
+                    <option value="tangential">Axial + tangential</option>
+                    <option value="all">All modes</option>
+                </select>
+            </label>
+            <div class="row mt">
+                <button id="prev" class="ghost">◀ Previous</button>
+                <button id="next" class="ghost">Next ▶</button>
+            </div>
+            <div id="modeList" role="group" aria-label="Predicted modes, tap one to play it"></div>
+            <p class="hint">One tone at a time. A resonance is a tone that sounds clearly louder than its neighbours. Put the speaker in a corner and stand in another corner.</p>
+        </div>
+        </section>
+
+        <section class="tab" id="tab-saved" role="tabpanel" aria-labelledby="tabBtn-saved" hidden>
+        <div class="card">
+            <h2>Saved measurements</h2>
+            <div id="savedList"></div>
+            <p class="hint" id="savedEmpty">Nothing saved yet. After a clap or a measured sweep, "Save this measurement" stores the spectrum here with the time and your location. You can add a photo and send it by mail or to another app.</p>
+            <div class="row mt"><button id="shareAll" class="ghost" hidden>Send all as one file</button></div>
+            <p class="hint">Saved on this phone only, until you send them. The location needs "Precise Location" allowed for this page. Photos are kept inside the app (reduced in size) and travel with the measurement when you send it; a web page cannot write to the phone's photo gallery itself.</p>
+            <p class="warn" id="savedMsg"></p>
+            <input type="file" id="photoInput" accept="image/*" hidden>
+        </div>
+        </section>
+
+        <section class="tab" id="tab-setup" role="tabpanel" aria-labelledby="tabBtn-setup" hidden>
         <div class="card">
             <h2>Room</h2>
             <label>Chamber
@@ -147,97 +279,6 @@
             <p class="warn" id="roomWarn"></p>
         </div>
 
-        <div class="card">
-            <div id="now">
-                <div id="nowFreq">–</div>
-                <div id="nowInfo">Nothing playing</div>
-            </div>
-            <label class="mt">Volume <input type="range" id="volume" min="0" max="1" step="0.01"></label>
-            <div class="row mt">
-                <button id="stop" disabled>Stop</button>
-            </div>
-            <p class="warn" id="audioWarn"></p>
-            <p class="sr" id="say" aria-live="polite"></p>
-        </div>
-
-        <div class="card">
-            <h2>Single tones</h2>
-            <label>Which modes
-                <select id="modeFilter">
-                    <option value="axial">Axial only (strongest)</option>
-                    <option value="tangential">Axial + tangential</option>
-                    <option value="all">All modes</option>
-                </select>
-            </label>
-            <div class="row mt">
-                <button id="prev" class="ghost">◀ Previous</button>
-                <button id="next" class="ghost">Next ▶</button>
-            </div>
-            <div id="modeList" role="group" aria-label="Predicted modes, tap one to play it"></div>
-            <p class="hint">One tone at a time. A resonance is a tone that sounds clearly louder than its neighbours. Put the speaker in a corner and stand in another corner.</p>
-        </div>
-
-        <div class="card">
-            <h2>Sweep</h2>
-            <div class="grid2">
-                <label>Duration
-                    <select id="sweepDur">
-                        <option value="30">30 s</option>
-                        <option value="60">60 s</option>
-                        <option value="120">120 s</option>
-                    </select>
-                </label>
-                <label>Sound comes from
-                    <select id="speaker">
-                        <option value="bt">Bluetooth</option>
-                        <option value="direct">Phone or cable</option>
-                    </select>
-                </label>
-            </div>
-            <div class="row mt">
-                <button id="sweep">Start sweep</button>
-            </div>
-            <p class="hint">Glides slowly from "From Hz" to "To Hz". With the microphone on, the level is plotted below. The speaker choice corrects for the delay a Bluetooth speaker adds.</p>
-        </div>
-
-        <div class="card">
-            <h2>Microphone</h2>
-            <div class="row">
-                <button id="mic" class="ghost">Turn microphone on</button>
-                <button id="clap" class="ghost" disabled>Record a clap (4 s)</button>
-            </div>
-            <div id="meter"><div id="meterBar"></div></div>
-            <div id="meterText">Microphone off</div>
-            <p class="hint">Easiest check: turn the microphone on, stop any tone, and record one sharp clap. The room rings at its own notes and no speaker is needed.</p>
-            <p class="hint">Nothing is sent anywhere. The sound of a clap is kept only if you save that measurement with "Keep the sound" ticked; everything else is analysed and discarded. On an iPhone, turning the microphone on can move the sound from a Bluetooth speaker to the phone itself. If the tone gets quiet, turn the microphone off and judge by ear, or use the clap.</p>
-            <p class="warn" id="micWarn"></p>
-        </div>
-
-        <div class="card">
-            <h2 id="chartTitle">Measurement</h2>
-            <canvas id="chart" role="img" aria-label="Measured level against frequency with predicted room modes"></canvas>
-            <p class="hint" id="chartHint">Run a sweep or record a clap with the microphone on. Gold line: measured level. Ticks along the top: the predicted modes listed above (long ticks are axial).</p>
-            <div id="peaks"></div>
-            <div id="saveBox" hidden>
-                <label class="mt">Place or note (optional)
-                    <input type="text" id="saveNote" maxlength="120" autocomplete="off" placeholder="e.g. stairwell, 2nd floor">
-                </label>
-                <label class="mt check" id="keepAudioRow" hidden><input type="checkbox" id="keepAudio" checked><span>Keep the sound of the clap for later analysis (<span id="keepAudioSize"></span>)</span></label>
-                <div class="row mt"><button id="saveBtn">Save this measurement</button></div>
-                <p class="hint" id="saveMsg"></p>
-            </div>
-        </div>
-
-        <div class="card">
-            <h2>Saved measurements</h2>
-            <div id="savedList"></div>
-            <p class="hint" id="savedEmpty">Nothing saved yet. After a clap or a measured sweep, "Save this measurement" stores the spectrum here with the time and your location. You can add a photo and send it by mail or to another app.</p>
-            <div class="row mt"><button id="shareAll" class="ghost" hidden>Send all as one file</button></div>
-            <p class="hint">Saved on this phone only, until you send them. The location needs "Precise Location" allowed for this page. Photos are kept inside the app (reduced in size) and travel with the measurement when you send it; a web page cannot write to the phone's photo gallery itself.</p>
-            <p class="warn" id="savedMsg"></p>
-            <input type="file" id="photoInput" accept="image/*" hidden>
-        </div>
-
         <p class="hint">Model: rigid rectangular room. Real rooms have openings, sloped ceilings and people in them, so expect measured peaks within a few percent of the prediction, not on it. The curve also contains your speaker's and microphone's own response.</p>
         <div class="card">
             <h2>Version</h2>
@@ -245,6 +286,7 @@
             <div class="row mt"><button id="checkUpdate" class="ghost">Check for update</button></div>
             <p class="hint" id="updateMsg" aria-live="polite"></p>
         </div>
+        </section>
     </main>
     <script>
         // Update plumbing. It lives here and not in app.js on purpose: if a release ever ships

@@ -73,6 +73,25 @@ INIT = r"""
 """.replace('%F0%', str(F0))
 
 failures = []
+def use_tabs(page):
+    """The page has tabs. Before acting on a control, go to its tab the way a person would: by tapping the tab button."""
+    async def go(selector):
+        tab = await page.evaluate("""(sel) => { const el = document.querySelector(sel); const panel = el && el.closest('.tab');
+            return panel && panel.hidden ? 'tabBtn-' + panel.id.slice(4) : ''; }""", selector)
+        if tab: await real_click('#' + tab)      # a real tap: fails if the tab button is covered or missing
+    real_click = page.click
+    def wrap(name):
+        real = getattr(page, name)
+        async def call(selector, *a, **k):
+            await go(selector)
+            return await real(selector, *a, **k)
+        setattr(page, name, call)
+    for name in ('click', 'fill', 'select_option', 'uncheck', 'check', 'dispatch_event'):
+        wrap(name)
+
+def ctx_of(page):
+    return page.context
+
 def check(ok, what, detail=''):
     print(('ok   ' if ok else 'FAIL ') + what + (('  ' + str(detail)) if detail != '' else ''))
     if not ok: failures.append(what)
@@ -122,6 +141,7 @@ async def new_page(browser, url, pre='', geo='grant'):
     errors = []
     page.on('pageerror', lambda e: errors.append(str(e)))
     page.on('console', lambda m: errors.append(m.text) if m.type == 'error' else None)
+    use_tabs(page)
     await page.add_init_script(pre + INIT)
     await page.goto(url)
     return page, errors
@@ -193,6 +213,54 @@ async def main():
               'a reversed range warns and empties the list', await page.evaluate("roomWarn.textContent"))
         await page.click('#sweep'); await page.wait_for_timeout(300)
         check(await page.evaluate(LIVE) == 0 and await page.evaluate("audioWarn.textContent !== ''"), 'and a sweep refuses to start', await page.evaluate("audioWarn.textContent"))
+        # ---- tabs: one page, four sections
+        vis = "[...document.querySelectorAll('.tab')].filter(t => !t.hidden).map(t => t.id).join()"
+        await page.fill('#fMin', '60'); await page.dispatch_event('#fMin', 'change')
+        for t in ('measure', 'play', 'saved', 'setup'):
+            await page.click('#tabBtn-' + t)
+            check(await page.evaluate(vis) == 'tab-' + t and await page.evaluate("document.querySelector('[role=tab][aria-selected=true]').id") == 'tabBtn-' + t, 'tab %s shows only its own section' % t, await page.evaluate(vis))
+        check(await page.evaluate("[...document.querySelectorAll('main .card')].every(c => c.id === 'updateNote' || c.closest('.tab'))"), 'every card belongs to a tab')
+        await page.click('#tabBtn-play')
+        spot = "JSON.stringify(['next', 'prev', 'modeFilter', 'tabBtn-saved'].map(id => Math.round(document.getElementById(id).getBoundingClientRect().top)))"
+        before = await page.evaluate(spot)
+        await page.click('#next'); await page.wait_for_timeout(900)
+        check(await page.evaluate(spot) == before, 'starting a tone moves nothing on the page (a second tap lands on the same button)', before + ' -> ' + await page.evaluate(spot))
+        # which control lives on which tab: this is the layout the owner agreed to
+        where = await page.evaluate("""Object.fromEntries(['mic','clap','chart','saveBtn','sweep','sweepDur','speaker','next','prev','modeFilter','modeList','savedList','shareAll','room','dimL','fMin','fMax','temp','checkUpdate','build']
+            .map(id => [id, (document.getElementById(id).closest('.tab') || {id: 'none'}).id.replace('tab-', '')]))""")
+        want = dict(mic='measure', clap='measure', chart='measure', saveBtn='measure', sweep='measure', sweepDur='measure', speaker='measure',
+                    next='play', prev='play', modeFilter='play', modeList='play', savedList='saved', shareAll='saved',
+                    room='setup', dimL='setup', fMin='setup', fMax='setup', temp='setup', checkUpdate='setup', build='setup')
+        check(where == want, 'every control is on its agreed tab', {k: v for k, v in where.items() if want[k] != v})
+        check(await page.evaluate("document.getElementById('stop').offsetParent !== null && nowCard.closest('.tab').id") == 'tab-play', 'volume and Stop are on the Play tab')
+        await page.click('#tabBtn-saved'); await page.wait_for_timeout(600)
+        check(await page.evaluate(LIVE) == 1 and await page.evaluate("!dotPlay.hidden && dotMeasure.hidden"), 'a tone keeps playing on another tab, and the Play tab is marked')
+        check(await page.evaluate("document.getElementById('stop').offsetParent === null && stripStop.offsetParent !== null && !stripStop.disabled"), 'a Stop button is in the top bar there')
+        await page.click('#tabBtn-play')
+        await page.evaluate("(() => { window.__moves = 0; new MutationObserver((m) => { window.__moves += m.length; }).observe(document.getElementById('nowSlotPlay'), { childList: true }); window.__saves = 0; const real = Storage.prototype.setItem; Storage.prototype.setItem = function (k, v) { window.__saves++; return real.call(this, k, v); }; })()")
+        await page.click('#tabBtn-play'); await page.wait_for_timeout(200)
+        check(await page.evaluate("window.__moves + window.__saves") == 0, 'tapping the open tab again changes nothing', await page.evaluate("window.__moves + ' moves, ' + window.__saves + ' saves'"))
+        await page.click('#tabBtn-saved')
+        await page.focus('#tabBtn-saved')
+        await page.keyboard.press('End')
+        check(await page.evaluate(vis) == 'tab-setup' and await page.evaluate("document.activeElement.id") == 'tabBtn-setup', 'the End key goes to the last tab')
+        await page.keyboard.press('ArrowRight')
+        check(await page.evaluate(vis) == 'tab-measure', 'and the right arrow wraps round to the first')
+        await page.click('#tabBtn-measure')
+        check(await page.evaluate("document.getElementById('stop').offsetParent !== null && !document.getElementById('stop').disabled && nowCard.closest('.tab').id") == 'tab-measure', 'volume and Stop follow to the Measure tab')
+        check(await page.evaluate("chart.clientWidth > 300 && chart.clientWidth !== 320 && chart.width === Math.round(chart.clientWidth * devicePixelRatio)"), 'the chart is drawn at its real size when its tab opens', await page.evaluate("chart.width + ' / ' + chart.clientWidth"))
+        await page.click('#tabBtn-setup'); await page.wait_for_timeout(500)
+        await page.click('#stripStop'); await page.wait_for_timeout(900)
+        check(await page.evaluate(LIVE) == 0 and await page.evaluate("dotPlay.hidden && stripStop.disabled"), 'Stop in the top bar works from any tab, then greys out and the mark goes away')
+        # a warning for a control on another tab is repeated in the top bar
+        await page.fill('#fMin', '300'); await page.dispatch_event('#fMin', 'change')
+        await page.click('#sweep'); await page.wait_for_timeout(700)
+        check(await page.evaluate("!notice.hidden && notice.textContent.includes('Setup tab') && notice.getBoundingClientRect().top < 200"), 'a warning is shown in the top bar, in view', await page.evaluate("notice.textContent"))
+        await page.fill('#fMin', '60'); await page.dispatch_event('#fMin', 'change'); await page.wait_for_timeout(600)
+        check(await page.evaluate("notice.hidden && audioWarn.textContent === ''"), 'and goes away when the setting is corrected')
+        await page.click('#tabBtn-setup')
+        await page.reload()
+        check(await page.evaluate(vis) == 'tab-setup', 'the last tab is remembered after a restart', await page.evaluate(vis))
         check(not errors, 'no page errors (tones)', errors)
         await page.close()
 
@@ -379,6 +447,13 @@ async def main():
         await page.reload()
         await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 1", timeout=5000)
         check('niche 3' in await page.evaluate("savedList.textContent"), 'the second tap deletes that one for good')
+        await page.click('#tabBtn-saved')
+        await page.click('#savedList .rec:first-child [data-role=show]'); await page.wait_for_timeout(300)
+        await page.wait_for_timeout(900)     # the smooth scroll
+        shown = await page.evaluate("document.getElementById('tab-measure').hidden ? 'hidden' : peaks.textContent")
+        check('saved measurement' in shown, '"Show" on a saved measurement opens it on the Measure tab', shown[-90:])
+        clear = await page.evaluate("chartTitle.getBoundingClientRect().top - document.getElementById('top').getBoundingClientRect().bottom")
+        check(clear >= 0, 'with its title clear of the top bar', clear)
         check(not errors, 'no page errors (saving)', errors)
         await page.screenshot(path=os.environ.get('SHOT', '/tmp/smoke.png'), full_page=True)
         await page.close()
@@ -407,6 +482,7 @@ async def main():
         url2 = 'http://127.0.0.1:%d/index.html' % srv2.server_address[1]
         ctx = await browser.new_context(viewport={'width': 390, 'height': 844})
         page = await ctx.new_page()
+        use_tabs(page)
         errors = []
         page.on('pageerror', lambda e: errors.append(str(e)))
         await page.goto(url2)
@@ -423,6 +499,11 @@ async def main():
         check(await page.evaluate("!checkUpdate.disabled"), 'and says so when there is no connection')
         await page.reload()
         check(await page.evaluate("modeList.children.length") > 10 and await page.evaluate("build.textContent") == v1, 'the app opens with no network after one visit', v1)
+        seen = []
+        for t in ('play', 'saved', 'setup', 'measure'):
+            await page.click('#tabBtn-' + t)
+            seen.append(await page.evaluate("[...document.querySelectorAll('.tab')].filter(t => !t.hidden).map(t => t.id).join()"))
+        check(seen == ['tab-play', 'tab-saved', 'tab-setup', 'tab-measure'], 'all four tabs open with no network', seen)
         await page.goto(url2.replace('index.html', ''))
         check(await page.evaluate("modeList.children.length") > 10, 'also from the bare address')
 

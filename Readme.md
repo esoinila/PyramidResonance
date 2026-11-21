@@ -39,6 +39,8 @@ After a clap or a measured sweep, "Save this measurement" stores the spectrum on
 - The location needs "Precise Location" allowed for the page. Without it the measurement is still saved.
 
 ### Versions and updates
+
+The page has four tabs (Measure, Play, Saved, Setup). They are sections of the one page that are shown and hidden, so switching never needs a network, and sound and the microphone keep running across them. A Stop button sits in the tab row on every tab.
 The page shows its version and when it was published at the bottom, with a "Check for update" button that asks the server which version is current. The app keeps a complete copy of itself on the phone and runs from that copy, so it opens with no signal. When the phone is online and a newer version exists, the whole new set is downloaded together and the page reloads itself (or shows a "Load the new version" button if something is playing). A release needs the same new number in `BUILD` in `app.js` and `VERSION` in `sw.js`, and the same publication time in `RELEASED` in both; a test checks that they match. Do not edit them by hand: `node scripts/release.js 2.3.0` stamps all three and then runs every test on the stamped files. Registering the service worker and reloading into a new version is done by a small script inside `index.html`, so a release whose `app.js` does not start can still be replaced by the next one.
 
 ### Reading the peak table
