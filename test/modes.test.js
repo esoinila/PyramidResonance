@@ -230,10 +230,13 @@ test('scripts/release.js stamps only the declarations and leaves working code', 
   const root = path.join(__dirname, '..');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pyramid-release-'));
   for (const f of ['app.js', 'sw.js']) fs.copyFileSync(path.join(root, f), path.join(tmp, f));
+  // start from an old time, so that the stamp always changes the line even within the same minute
+  const old = (f) => fs.readFileSync(path.join(root, f), 'utf8').replace(/^(\s*const RELEASED = ')[^']*/m, '$12001-01-01T00:00:00Z');
+  for (const f of ['app.js', 'sw.js']) fs.writeFileSync(path.join(tmp, f), old(f));
   const r = spawnSync('node', [path.join(root, 'scripts', 'release.js'), '7.8.9', '--root', tmp, '--stamp-only'], { encoding: 'utf8' });
   assert.strictEqual(r.status, 0, r.stderr);
   const changed = (f) => {
-    const a = fs.readFileSync(path.join(root, f), 'utf8').split('\n'), b = fs.readFileSync(path.join(tmp, f), 'utf8').split('\n');
+    const a = old(f).split('\n'), b = fs.readFileSync(path.join(tmp, f), 'utf8').split('\n');
     assert.strictEqual(a.length, b.length);
     return b.filter((line, i) => line !== a[i]);
   };
