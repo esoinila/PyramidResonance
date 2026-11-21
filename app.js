@@ -8,8 +8,8 @@
 
     // Must equal VERSION in sw.js (a test checks it). Change both for every release:
     // the new sw.js is what makes phones fetch the new files, all at once.
-    const BUILD = '2.2.1';
-    const RELEASED = '2026-11-21T17:50:00Z';   // when this version was published; the same value is in sw.js
+    const BUILD = '2.2.2';
+    const RELEASED = '2026-11-21T17:52:00Z';   // when this version was published; the same value is in sw.js
     const MATCH_TOL = 1.5;    // percent: how close a measured peak must be to a listed mode
 
     let swReg = null;
@@ -1195,7 +1195,7 @@
             ]);
             if (!res.ok) throw new Error('status ' + res.status);
             const text = await res.text();
-            const v = text.match(/const VERSION = '([^']+)'/), r = text.match(/const RELEASED = '2026-11-21T17:50:00Z']+)'/);
+            const v = text.match(/const VERSION = '([^']+)'/), r = text.match(/const RELEASED = '([^']+)'/);
             if (!v) throw new Error('unreadable');
             if (v[1] === BUILD) {
                 msg('This is the newest version (checked ' + formatWhen(new Date().toISOString()) + ').');
