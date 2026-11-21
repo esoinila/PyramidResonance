@@ -85,11 +85,11 @@
         #tabs button[aria-selected="true"] { color: #000; background: var(--gold); border-color: var(--gold); font-weight: 700; }
         #tabs .dot { color: var(--bad); }
         #tabs button[aria-selected="true"] .dot { color: #7a0000; }
-        #strip { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
-        #strip button { flex: none; min-height: 44px; padding: 8px 16px; }
-        #stripText { color: var(--muted); font-size: .9rem; font-variant-numeric: tabular-nums; }
+        #bar { display: flex; gap: 6px; }
+        #tabs { flex: 1; min-width: 0; }
+        #stripStop { flex: none; width: 48px; min-height: 44px; padding: 0; font-size: 1.1rem; }
         #notice { margin: 8px 0 0; min-height: 0; }
-        #chartTitle { scroll-margin-top: 130px; }   /* clear of the sticky bar when scrolled to */
+        #nowLevel { color: var(--gold); font-size: .9rem; min-height: 1.3em; font-variant-numeric: tabular-nums; }
 
         #now { text-align: center; padding: 8px 0 2px; }
         #nowFreq { font-size: 2.2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -136,18 +136,17 @@
         </div>
 
         <div id="top">
-            <div id="tabs" role="tablist" aria-label="Sections">
-                <button role="tab" id="tabBtn-measure" data-tab="measure" aria-controls="tab-measure">Measure<span id="dotMeasure" hidden><span class="dot" aria-hidden="true"> ●</span><span class="sr"> (microphone or sweep on)</span></span></button>
-                <button role="tab" id="tabBtn-play" data-tab="play" aria-controls="tab-play">Play<span id="dotPlay" hidden><span class="dot" aria-hidden="true"> ♪</span><span class="sr"> (a tone is playing)</span></span></button>
-                <button role="tab" id="tabBtn-saved" data-tab="saved" aria-controls="tab-saved">Saved</button>
-                <button role="tab" id="tabBtn-setup" data-tab="setup" aria-controls="tab-setup">Setup</button>
+            <div id="bar">
+                <div id="tabs" role="tablist" aria-label="Sections">
+                    <button role="tab" id="tabBtn-measure" data-tab="measure" aria-controls="tab-measure">Measure<span id="dotMeasure" hidden><span class="dot" aria-hidden="true"> ●</span><span class="sr"> (microphone or sweep on)</span></span></button>
+                    <button role="tab" id="tabBtn-play" data-tab="play" aria-controls="tab-play">Play<span id="dotPlay" hidden><span class="dot" aria-hidden="true"> ♪</span><span class="sr"> (a tone is playing)</span></span></button>
+                    <button role="tab" id="tabBtn-saved" data-tab="saved" aria-controls="tab-saved">Saved</button>
+                    <button role="tab" id="tabBtn-setup" data-tab="setup" aria-controls="tab-setup">Setup</button>
+                </div>
+                <!-- Always in reach, on every tab. It is always there (greyed when silent), so nothing moves when a tone starts. -->
+                <button id="stripStop" aria-label="Stop the sound" disabled>■</button>
             </div>
-            <!-- Always in reach while anything sounds, whichever tab is open -->
-            <div id="strip" hidden>
-                <button id="stripStop">■ Stop</button>
-                <span id="stripText"></span>
-            </div>
-            <p class="warn" id="notice" hidden></p>
+            <p class="warn" id="notice" role="status" hidden></p>
         </div>
         <p class="sr" id="say" aria-live="polite"></p>
         <!-- All four sections are in this one page; switching only shows and hides them, so it never needs a network. -->
@@ -214,6 +213,7 @@
             <div id="now">
                 <div id="nowFreq">–</div>
                 <div id="nowInfo">Nothing playing</div>
+                <div id="nowLevel"></div>
             </div>
             <label class="mt">Volume <input type="range" id="volume" min="0" max="1" step="0.01"></label>
             <div class="row mt">

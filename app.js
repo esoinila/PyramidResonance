@@ -134,7 +134,10 @@
         if (idx >= 0 && kids[idx]) {
             kids[idx].classList.add('active');
             kids[idx].setAttribute('aria-current', 'true');
-            if (kids[idx].scrollIntoView) kids[idx].scrollIntoView({ block: 'nearest' });
+            // bring the row into view inside the list only: the page itself must not move under the finger
+            const list = $('modeList'), row = kids[idx], top = row.offsetTop - list.offsetTop;
+            if (top < list.scrollTop) list.scrollTop = top;
+            else if (top + row.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = top + row.offsetHeight - list.clientHeight;
         }
     }
 
@@ -1008,6 +1011,7 @@
         note('This is a saved measurement' + (rec.location ? ' from ' + R.formatLocation(rec.location) : '') + '. A new clap or sweep replaces it on screen; the saved copy stays on the Saved tab.');
         showTab('measure');     // the chart lives there
         drawChart();
+        $('chartTitle').style.scrollMarginTop = ($('top').offsetHeight + 12) + 'px';   // clear of the sticky bar, however tall it is now
         if ($('chartTitle').scrollIntoView) $('chartTitle').scrollIntoView({ block: 'start', behavior: 'smooth' });
     }
 
@@ -1183,6 +1187,7 @@
         if (name === 'measure') $('nowSlotMeasure').appendChild($('nowCard'));
         if (name === 'play') $('nowSlotPlay').appendChild($('nowCard'));
         if (name === 'measure') drawChart();    // a hidden canvas has no size: draw now that it shows
+        tabMarks();     // at once, so the top bar never changes height a moment after the switch
         if (byUser && changed) window.scrollTo(0, 0);
     }
     // marks on the tab buttons, so that a tone or an open microphone is never out of sight
@@ -1191,10 +1196,12 @@
         $('dotPlay').hidden = !voice || sweeping;
         $('dotMeasure').hidden = !(micOn || clapBusy || sweeping);
         // Stop, the frequency and the level stay in reach on every tab while something sounds
-        $('strip').hidden = !voice;
-        if (voice) $('stripText').textContent = micOn && /dB/.test($('meterText').textContent) ? $('meterText').textContent : $('nowFreq').textContent;   // with the microphone on: the level at this tone
+        $('stripStop').disabled = !voice;
+        // with the microphone on, the level at the playing tone is shown next to it (the line is always there: nothing jumps)
+        const level = voice && micOn && /dB/.test($('meterText').textContent) ? 'Microphone: ' + $('meterText').textContent : '';
+        if ($('nowLevel').textContent !== level) $('nowLevel').textContent = level;
         // a warning written on a tab that is not open is repeated here, so nothing fails silently
-        const notes = [$('audioWarn').textContent, settings.tab === 'measure' ? '' : $('micWarn').textContent].filter(Boolean).join(' ');
+        const notes = [settings.tab === 'play' ? '' : $('audioWarn').textContent, settings.tab === 'measure' ? '' : $('micWarn').textContent].filter(Boolean).join(' ');
         if ($('notice').textContent !== notes) $('notice').textContent = notes;
         $('notice').hidden = !notes;
     }
@@ -1283,6 +1290,8 @@
         const before = Object.assign({}, settings);
         mutate();
         sanitize(settings);
+        // a complaint about the old settings is out of date now
+        ['audioWarn', 'micWarn'].forEach((id) => { if ($(id).textContent.includes('Setup tab')) $(id).textContent = ''; });
         if (voice || clapBusy) stopAll();
         rawAudio = null; curve = []; curveKind = ''; curveState = 'none'; viewing = null; recording = false; $('peaks').textContent = '';
         if (!recompute()) {
@@ -1319,6 +1328,8 @@
     $('next').addEventListener('click', () => playMode(lastIdx + 1));
     $('stop').addEventListener('click', stopAll);
     $('stripStop').addEventListener('click', stopAll);
+    // a warning in the top bar goes away when tapped
+    $('notice').addEventListener('click', () => { $('audioWarn').textContent = ''; $('micWarn').textContent = ''; tabMarks(); });
     $('sweep').addEventListener('click', toggleSweep);
     $('mic').addEventListener('click', toggleMic);
     $('clap').addEventListener('click', recordClap);
