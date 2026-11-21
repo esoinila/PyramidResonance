@@ -153,6 +153,21 @@
         </div>
 
         <div class="card">
+            <h2 id="chartTitle">Measurement</h2>
+            <canvas id="chart" role="img" aria-label="Measured level against frequency with predicted room modes"></canvas>
+            <p class="hint" id="chartHint">Run a sweep or record a clap with the microphone on. Gold line: measured level. Ticks along the top: the predicted modes of the room chosen in Setup (long ticks are axial).</p>
+            <div id="peaks"></div>
+            <div id="saveBox" hidden>
+                <label class="mt">Place or note (optional)
+                    <input type="text" id="saveNote" maxlength="120" autocomplete="off" placeholder="e.g. stairwell, 2nd floor">
+                </label>
+                <label class="mt check" id="keepAudioRow" hidden><input type="checkbox" id="keepAudio" checked><span>Keep the sound of the clap for later analysis (<span id="keepAudioSize"></span>)</span></label>
+                <div class="row mt"><button id="saveBtn">Save this measurement</button></div>
+                <p class="hint" id="saveMsg"></p>
+            </div>
+        </div>
+
+        <div class="card">
             <h2>Sweep</h2>
             <p class="hint roomLine" style="margin-top:0"></p>
             <div class="grid2 mt">
@@ -173,25 +188,10 @@
             <div class="row mt">
                 <button id="sweep">Start sweep</button>
             </div>
-            <p class="hint">Glides slowly from "From Hz" to "To Hz". With the microphone on, the level is plotted in the chart below. The speaker choice corrects for the delay a Bluetooth speaker adds.</p>
+            <p class="hint">Glides slowly from "From Hz" to "To Hz". With the microphone on, the level is plotted in the chart above. The speaker choice corrects for the delay a Bluetooth speaker adds.</p>
         </div>
 
         <div id="nowSlotMeasure"></div>
-
-        <div class="card">
-            <h2 id="chartTitle">Measurement</h2>
-            <canvas id="chart" role="img" aria-label="Measured level against frequency with predicted room modes"></canvas>
-            <p class="hint" id="chartHint">Run a sweep or record a clap with the microphone on. Gold line: measured level. Ticks along the top: the predicted modes of the room chosen in Setup (long ticks are axial).</p>
-            <div id="peaks"></div>
-            <div id="saveBox" hidden>
-                <label class="mt">Place or note (optional)
-                    <input type="text" id="saveNote" maxlength="120" autocomplete="off" placeholder="e.g. stairwell, 2nd floor">
-                </label>
-                <label class="mt check" id="keepAudioRow" hidden><input type="checkbox" id="keepAudio" checked><span>Keep the sound of the clap for later analysis (<span id="keepAudioSize"></span>)</span></label>
-                <div class="row mt"><button id="saveBtn">Save this measurement</button></div>
-                <p class="hint" id="saveMsg"></p>
-            </div>
-        </div>
         </section>
 
         <section class="tab" id="tab-play" role="tabpanel" aria-labelledby="tabBtn-play" hidden>
