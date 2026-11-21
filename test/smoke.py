@@ -289,6 +289,7 @@ async def main():
         check(await page.evaluate("!keepAudioRow.hidden && keepAudio.checked && /^[34]\\.\\d s, [01]\\.\\d MB$/.test(keepAudioSize.textContent)"), 'and offers to keep its sound', await page.evaluate("keepAudioSize.textContent"))
         await page.evaluate(SHARE_MOCK)
         await page.fill('#saveNote', 'Test room, niche 3')
+        check(await page.evaluate("PyramidUpdate.busy() === true"), 'an unsaved measurement holds back the automatic reload into a new version')
         await page.click('#saveBtn')
         await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 1", timeout=5000)
         check(await page.evaluate("saveBtn.disabled && saveBtn.textContent === 'Saved'"), 'the same measurement cannot be saved twice')
@@ -504,7 +505,7 @@ async def main():
         check(dead, '(test setup) the broken release took over and its page does not start', await page.evaluate("build.textContent"))
         await page.wait_for_timeout(16000)
         # ... and so must one that parses but stops with an error while starting
-        publish('9.9.11', good_app.replace("const R = window.Records;", "const R = window.Records; if (R) throw new Error('boom at start');", 1))
+        publish('9.9.11', good_app.replace("const updater = window.PyramidUpdate || null;", "const updater = window.PyramidUpdate || null; if (updater) { updater.busy = () => neverDeclared; throw new Error('boom at start'); }", 1))
         await page.reload()
         dead = False
         for _ in range(80):

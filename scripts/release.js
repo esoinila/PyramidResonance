@@ -2,20 +2,22 @@
 // Stamps a release: node scripts/release.js 2.3.0
 // Sets BUILD in app.js, VERSION in sw.js and RELEASED (now, UTC) in both, each on exactly
 // one line that starts with the constant, then runs every test. Publish only if this ends
-// with "Release ... is ready". With --no-browser it skips the slow browser test.
+// with "Release ... is ready". If a test fails, the old numbers are put back.
+// With --no-browser it skips the slow browser test.
 'use strict';
 const fs = require('node:fs'), path = require('node:path'), { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
 const rootAt = args.indexOf('--root');   // --root <dir>: stamp a copy somewhere else (used by the tests)
-const root = rootAt >= 0 ? path.resolve(args[rootAt + 1]) : path.join(__dirname, '..');
+const root = rootAt >= 0 && args[rootAt + 1] ? path.resolve(args[rootAt + 1]) : path.join(__dirname, '..');
 const version = args[0];
-if (!/^\d+\.\d+\.\d+$/.test(version || '')) { console.error('Usage: node scripts/release.js <major.minor.patch> [--no-browser]'); process.exit(2); }
+const usage = 'Usage: node scripts/release.js <major.minor.patch> [--no-browser] [--stamp-only] [--root <dir>]';
+if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version || '') || (rootAt >= 0 && !args[rootAt + 1])) { console.error(usage); process.exit(2); }
 const released = new Date().toISOString().replace(/:\d\d\.\d+Z$/, ':00Z');
 
 // Nothing is written until every constant has been found, so a failure leaves all files as they were.
-const files = {};
+const files = {}, originals = {};
 function lineOf(file, name) {
-    if (!files[file]) files[file] = fs.readFileSync(path.join(root, file), 'utf8').split('\n');
+    if (!files[file]) { originals[file] = fs.readFileSync(path.join(root, file), 'utf8'); files[file] = originals[file].split('\n'); }
     const pattern = new RegExp('^(\\s*const ' + name + " = ')([^']*)(';.*)$");   // the whole line must be the declaration
     const hits = files[file].map((line, i) => (pattern.test(line) ? i : -1)).filter((i) => i >= 0);
     if (hits.length !== 1) throw new Error(file + ': expected one line declaring ' + name + ', found ' + hits.length);
@@ -34,7 +36,12 @@ for (const file of Object.keys(files)) fs.writeFileSync(path.join(root, file), f
 function run(cmd, args) {
     console.log('\n> ' + cmd + ' ' + args.join(' '));
     const r = spawnSync(cmd, args, { cwd: root, stdio: 'inherit' });
-    if (r.status !== 0) { console.error('\nFAILED: ' + cmd + ' ' + args.join(' ') + '. Do not publish.'); process.exit(1); }
+    if (r.status !== 0) {
+        // put the old version numbers back, so the same release can be tried again after the fix
+        for (const file of Object.keys(originals)) fs.writeFileSync(path.join(root, file), originals[file]);
+        console.error('\nFAILED: ' + cmd + ' ' + args.join(' ') + '. Nothing was stamped. Do not publish.');
+        process.exit(1);
+    }
 }
 
 console.log('Stamped ' + version + ', ' + released);

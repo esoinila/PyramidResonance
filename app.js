@@ -1190,20 +1190,18 @@
         let text = null, reached = false;
         const stop = new AbortController();
         const timer = setTimeout(() => stop.abort(), 8000);   // covers the whole download, not only its start
-        let status = 0;
+        let badStatus = 0;
         try {
             const res = await fetch('./sw.js?check=' + Date.now(), { cache: 'no-store', signal: stop.signal });
-            reached = true;
-            status = res.status;
-            if (res.ok) text = await res.text();
-        } catch (e) { /* no network, or too slow */ }
+            if (res.ok) { text = await res.text(); reached = true; } else { badStatus = res.status; reached = true; }
+        } catch (e) { /* no network, or too slow to finish */ }
         clearTimeout(timer);
         // the patterns are put together from two pieces so that no release tool can mistake them for the constants
         const find = (name) => { const m = text && text.match(new RegExp('const ' + name + " = '([^']+)'")); return m ? m[1] : null; };
         const version = find('VERSION'), released = find('RELEASED');
         if (!version) {
-            msg(!reached ? 'Could not check: no connection to the server. You have version ' + BUILD + '.'
-                : text === null ? 'Could not check: the server answered with an error (' + status + '). You have version ' + BUILD + '.'
+            msg(!reached ? 'Could not check: no connection to the server, or it is too slow. You have version ' + BUILD + '.'
+                : badStatus ? 'Could not check: the server answered with an error (' + badStatus + '). You have version ' + BUILD + '.'
                     : 'Could not check: the answer was not from the app\'s server (a network that wants a login first does this). You have version ' + BUILD + '.');
             return;
         }
@@ -1216,25 +1214,27 @@
         const reg = updater && updater.reg;
         if (!reg) { msg(what + ' is available. Close the app completely and open it again to get it.'); return; }
         msg(what + ' is available. Downloading it…');
-        let slow = false;
-        const slowTimer = setTimeout(() => { slow = true; msg(what + ' is available. The download is slow; it continues by itself, and you can keep using the app.'); }, 20000);
-        try {
-            await Promise.race([reg.update(), new Promise((resolve) => setTimeout(resolve, 21000))]);
-        } catch (e) { clearTimeout(slowTimer); msg(what + ' is available, but the download did not start. Try again with a better connection.'); return; }
-        clearTimeout(slowTimer);
-        if (slow) return;
-        if (updater.ready) { loadIt(); return; }
-        const worker = reg.installing || reg.waiting;
-        if (!worker) {
-            // the address without "?check" can be a few minutes behind right after a release
-            msg(what + ' is available, but the server is still handing out the old files. This passes within about 10 minutes of a release: try again then.');
-            return;
-        }
-        msg(what + ' is downloading. When it is ready the page reloads by itself, or a "Load the new version" button appears at the top if you are in the middle of something.');
         // a file did not arrive, or the server has published only part of the release so far
         const failed = () => msg(what + ' is available, but it could not be installed yet. You still have the whole version ' + BUILD + '. Try again in a few minutes.');
-        worker.addEventListener('statechange', () => { if (worker.state === 'redundant' && !updater.ready) failed(); });
-        if (worker.state === 'redundant') failed();
+        // what to say once the browser has fetched the new sw.js; also runs late, after a slow download
+        const afterUpdate = () => {
+            if (updater.ready) { loadIt(); return; }
+            const worker = reg.installing || reg.waiting;
+            if (!worker) {
+                // the address without "?check" can be a few minutes behind right after a release
+                msg(what + ' is available, but the server is still handing out the old files. This passes within about 10 minutes of a release: try again then.');
+                return;
+            }
+            msg(what + ' is downloading. When it is ready the page reloads by itself, or a "Load the new version" button appears at the top if you are in the middle of something.');
+            worker.addEventListener('statechange', () => { if (worker.state === 'redundant' && !updater.ready) failed(); });
+            if (worker.state === 'redundant') failed();
+        };
+        const slowTimer = setTimeout(() => msg(what + ' is available. The download is slow; it continues by itself, and you can keep using the app.'), 20000);
+        const update = reg.update().then(
+            () => { clearTimeout(slowTimer); afterUpdate(); },
+            () => { clearTimeout(slowTimer); msg(what + ' is available, but the download did not start. Try again with a better connection.'); });
+        // the button is given back after 21 s at the latest; the message above still follows the download
+        await Promise.race([update, new Promise((resolve) => setTimeout(resolve, 21000))]);
     }
 
     // ---------- Wiring ----------
@@ -1297,7 +1297,7 @@
     setSessionType('playback');
     // Last of all, when everything it reads exists: an automatic reload must not cut off a sound,
     // a measurement in progress, or a finished measurement that has not been saved yet.
-    if (updater) updater.busy = () => !!(voice || micOn || clapBusy || curveState === 'done' || $('saveNote').value.trim());
+    if (updater) updater.busy = () => !!(voice || micOn || clapBusy || curveState === 'done' || (!$('saveBox').hidden && $('saveNote').value.trim()));
     syncInputs();
     if (!recompute()) {
         // a stored range that is too large: fall back to the default range, keep the room

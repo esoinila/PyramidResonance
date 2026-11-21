@@ -250,6 +250,13 @@ test('scripts/release.js stamps only the declarations and leaves working code', 
   for (const v of ['7.8.9', '7.8.8', '6.99.99']) assert.notStrictEqual(spawnSync('node', [path.join(root, 'scripts', 'release.js'), v, '--root', tmp, '--stamp-only']).status, 0, v);
   assert.strictEqual(fs.readFileSync(path.join(tmp, 'app.js'), 'utf8'), before);
   assert.strictEqual(spawnSync('node', [path.join(root, 'scripts', 'release.js'), '7.10.0', '--root', tmp, '--stamp-only']).status, 0, '7.10.0 is higher than 7.8.9');
+  for (const bad of [['07.11.0', '--root', tmp, '--stamp-only'], ['7.11.0', '--stamp-only', '--root']]) {
+    assert.strictEqual(spawnSync('node', [path.join(root, 'scripts', 'release.js'), ...bad]).status, 2, bad.join(' '));
+  }
+  // the two files disagreeing is refused as long as one of them is not lower than the new number
+  fs.writeFileSync(path.join(tmp, 'sw.js'), fs.readFileSync(path.join(tmp, 'sw.js'), 'utf8').replace("const VERSION = '7.10.0'", "const VERSION = '8.0.0'"));
+  assert.notStrictEqual(spawnSync('node', [path.join(root, 'scripts', 'release.js'), '7.11.0', '--root', tmp, '--stamp-only']).status, 0);
+  assert.ok(fs.readFileSync(path.join(tmp, 'app.js'), 'utf8').includes("const BUILD = '7.10.0'"), 'and app.js is left alone');
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
