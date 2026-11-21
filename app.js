@@ -8,28 +8,14 @@
 
     // Must equal VERSION in sw.js (a test checks it). Change both for every release:
     // the new sw.js is what makes phones fetch the new files, all at once.
-    const BUILD = '2.2.2';
-    const RELEASED = '2026-11-21T17:52:00Z';   // when this version was published; the same value is in sw.js
+    const BUILD = '2.2.3';
+    const RELEASED = '2026-11-21T18:31:00Z';   // when this version was published; the same value is in sw.js
     const MATCH_TOL = 1.5;    // percent: how close a measured peak must be to a listed mode
 
-    let swReg = null;
-    if ('serviceWorker' in navigator) {
-        const hadController = !!navigator.serviceWorker.controller;
-        navigator.serviceWorker.addEventListener('controllerchange', () => {
-            if (!hadController) return;           // first install: this page is already the new version
-            let reloaded = false;
-            try { reloaded = sessionStorage.getItem('pyramid-res-reloaded') === BUILD; sessionStorage.setItem('pyramid-res-reloaded', BUILD); } catch (e) { /* ignore */ }
-            if (!reloaded && !voice && !micOn && !clapBusy) { location.reload(); return; }
-            $('updateNote').hidden = false;
-        });
-        window.addEventListener('load', () => {
-            navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then((reg) => {
-                swReg = reg;
-                // a home-screen app is often resumed, not relaunched: look for an update then too
-                document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
-            }).catch((err) => console.log('Service worker registration failed', err));
-        });
-    }
+    // Registering the service worker and reloading into a new version is done by the small
+    // script in index.html, so that a release with a broken app.js can still be replaced.
+    // It asks this script whether a reload would cost the user something (updater.busy, set at the very end).
+    const updater = window.PyramidUpdate || null;
 
     // ---------- Settings ----------
     const MAX_MODES = 6000;   // refuse ranges that would compute more than this
@@ -1181,6 +1167,15 @@
         const p = (n) => String(n).padStart(2, '0');
         return t.getDate() + '.' + (t.getMonth() + 1) + '.' + t.getFullYear() + ' ' + p(t.getHours()) + ':' + p(t.getMinutes());
     }
+    // 1 when version a is newer than b, -1 when older, 0 when the same ("2.10.0" is newer than "2.9.9")
+    function compareVersions(a, b) {
+        const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
+        for (let i = 0; i < Math.max(x.length, y.length); i++) {
+            const d = (x[i] || 0) - (y[i] || 0);
+            if (d) return d > 0 ? 1 : -1;
+        }
+        return 0;
+    }
     // Asks the server which version is published now, past every cache. sw.js is never in
     // the offline cache, so this request always goes to the network.
     async function checkUpdate() {
@@ -1188,27 +1183,58 @@
         const button = $('checkUpdate');
         button.disabled = true;
         msg('Checking…');
-        try {
-            const res = await Promise.race([
-                fetch('./sw.js?check=' + Date.now(), { cache: 'no-store' }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000)),
-            ]);
-            if (!res.ok) throw new Error('status ' + res.status);
-            const text = await res.text();
-            const v = text.match(/const VERSION = '([^']+)'/), r = text.match(/const RELEASED = '([^']+)'/);
-            if (!v) throw new Error('unreadable');
-            if (v[1] === BUILD) {
-                msg('This is the newest version (checked ' + formatWhen(new Date().toISOString()) + ').');
-            } else {
-                msg('Version ' + v[1] + (r ? ', published ' + formatWhen(r[1]) + ',' : '') + ' is available. Downloading it now; this page reloads when it is ready' +
-                    (voice || micOn || clapBusy ? ', or shows a button at the top while something is playing or the microphone is on.' : '.'));
-                if (swReg) swReg.update().catch(() => msg('Version ' + v[1] + ' is available, but the download failed. Try again with a better connection.'));
-                else msg('Version ' + v[1] + ' is available. Close the app completely and open it again to get it.');
-            }
-        } catch (e) {
-            msg('Could not check: no connection to the server. You have version ' + BUILD + '.');
-        }
+        try { await checkUpdateNow(msg); } catch (e) { msg('The check failed. You have version ' + BUILD + '.'); }
         button.disabled = false;
+    }
+    async function checkUpdateNow(msg) {
+        let text = null, reached = false;
+        const stop = new AbortController();
+        const timer = setTimeout(() => stop.abort(), 8000);   // covers the whole download, not only its start
+        let badStatus = 0;
+        try {
+            const res = await fetch('./sw.js?check=' + Date.now(), { cache: 'no-store', signal: stop.signal });
+            if (res.ok) { text = await res.text(); reached = true; } else { badStatus = res.status; reached = true; }
+        } catch (e) { /* no network, or too slow to finish */ }
+        clearTimeout(timer);
+        // the patterns are put together from two pieces so that no release tool can mistake them for the constants
+        const find = (name) => { const m = text && text.match(new RegExp('const ' + name + " = '([^']+)'")); return m ? m[1] : null; };
+        const version = find('VERSION'), released = find('RELEASED');
+        if (!version) {
+            msg(!reached ? 'Could not check: no connection to the server, or it is too slow. You have version ' + BUILD + '.'
+                : badStatus ? 'Could not check: the server answered with an error (' + badStatus + '). You have version ' + BUILD + '.'
+                    : 'Could not check: the answer was not from the app\'s server (a network that wants a login first does this). You have version ' + BUILD + '.');
+            return;
+        }
+        const order = compareVersions(version, BUILD);
+        if (order === 0) { msg('This is the newest version (checked ' + formatWhen(new Date().toISOString()) + ').'); return; }
+        if (order < 0) { msg('The server still offers the older version ' + version + '; you already have ' + BUILD + '. Nothing to do.'); return; }
+        const what = 'Version ' + version + (released ? ', published ' + formatWhen(released) + ',' : '');
+        const loadIt = () => { $('updateNote').hidden = false; msg(what + ' is downloaded. Tap "Load the new version" at the top of the page.'); };
+        if (updater && updater.ready) { loadIt(); return; }
+        const reg = updater && updater.reg;
+        if (!reg) { msg(what + ' is available. Close the app completely and open it again to get it.'); return; }
+        msg(what + ' is available. Downloading it…');
+        // a file did not arrive, or the server has published only part of the release so far
+        const failed = () => msg(what + ' is available, but it could not be installed yet. You still have the whole version ' + BUILD + '. Try again in a few minutes.');
+        // what to say once the browser has fetched the new sw.js; also runs late, after a slow download
+        const afterUpdate = () => {
+            if (updater.ready) { loadIt(); return; }
+            const worker = reg.installing || reg.waiting;
+            if (!worker) {
+                // the address without "?check" can be a few minutes behind right after a release
+                msg(what + ' is available, but the server is still handing out the old files. This passes within about 10 minutes of a release: try again then.');
+                return;
+            }
+            msg(what + ' is downloading. When it is ready the page reloads by itself, or a "Load the new version" button appears at the top if you are in the middle of something.');
+            worker.addEventListener('statechange', () => { if (worker.state === 'redundant' && !updater.ready) failed(); });
+            if (worker.state === 'redundant') failed();
+        };
+        const slowTimer = setTimeout(() => msg(what + ' is available. The download is slow; it continues by itself, and you can keep using the app.'), 20000);
+        const update = reg.update().then(
+            () => { clearTimeout(slowTimer); afterUpdate(); },
+            () => { clearTimeout(slowTimer); msg(what + ' is available, but the download did not start. Try again with a better connection.'); });
+        // the button is given back after 21 s at the latest; the message above still follows the download
+        await Promise.race([update, new Promise((resolve) => setTimeout(resolve, 21000))]);
     }
 
     // ---------- Wiring ----------
@@ -1268,8 +1294,10 @@
     $('build').textContent = 'Version ' + BUILD;
     $('released').textContent = ', published ' + formatWhen(RELEASED);
     $('checkUpdate').addEventListener('click', checkUpdate);
-    $('reload').addEventListener('click', () => location.reload());
     setSessionType('playback');
+    // Last of all, when everything it reads exists: an automatic reload must not cut off a sound,
+    // a measurement in progress, or a finished measurement that has not been saved yet.
+    if (updater) updater.busy = () => !!(voice || micOn || clapBusy || curveState === 'done' || (!$('saveBox').hidden && $('saveNote').value.trim()));
     syncInputs();
     if (!recompute()) {
         // a stored range that is too large: fall back to the default range, keep the room
