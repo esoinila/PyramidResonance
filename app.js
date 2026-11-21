@@ -8,7 +8,7 @@
 
     // Must equal VERSION in sw.js (a test checks it). Change both for every release:
     // the new sw.js is what makes phones fetch the new files, all at once.
-    const BUILD = '2.1.1';
+    const BUILD = '2.2.0';
     const MATCH_TOL = 1.5;    // percent: how close a measured peak must be to a listed mode
 
     if ('serviceWorker' in navigator) {
@@ -374,7 +374,7 @@
             if (clapBusy) return;
             abortSweep();
             recording = micOn;
-            if (recording) { curve = []; curveState = 'none'; viewing = null; curveKind = 'sweep'; disturbed = false; $('peaks').textContent = ''; }
+            if (recording) { rawAudio = null; curve = []; curveState = 'none'; viewing = null; curveKind = 'sweep'; disturbed = false; $('peaks').textContent = ''; }
             lastReadF = 0;
             setActive(-1);
             startVoice('sweep', settings.fMin, settings.fMax, settings.sweepDur);
@@ -441,6 +441,74 @@
     let clapBusy = false;
     let clapRun = 0;          // identifies one recording, so a cancelled one cannot carry on
 
+    // Raw sound of a clap. A small tap node hands the microphone samples to the page, only
+    // while a clap is being recorded. The sound is kept in memory and is stored only if
+    // the measurement is saved with "Keep the sound" ticked.
+    let tap = null;           // { node, sink, start(), stop() }
+    let rawChunks = null;     // blocks of samples while a clap is being recorded, else null
+    let rawCount = 0;
+    let rawAudio = null;      // { samples: Float32Array, sampleRate } of the clap on screen
+    const RAW_MAX_S = 6;      // never keep more than this, whatever the timers do
+    const TAP_SRC = "registerProcessor('pr-tap', class extends AudioWorkletProcessor {" +
+        " constructor() { super(); this.on = false; this.port.onmessage = (e) => { this.on = !!e.data; }; }" +
+        " process(inputs) { const ch = inputs[0] && inputs[0][0]; if (this.on && ch && ch.length) this.port.postMessage(ch.slice()); return true; } });";
+
+    function tapBlock(block) {
+        if (!rawChunks || !ctx || rawCount >= RAW_MAX_S * ctx.sampleRate) return;
+        rawChunks.push(block);
+        rawCount += block.length;
+    }
+    async function startTap(source) {
+        let node = null, start = null, stop = null;
+        try {
+            if (ctx.audioWorklet && window.AudioWorkletNode) {
+                if (!ctx.prTapModule) {
+                    const url = URL.createObjectURL(new Blob([TAP_SRC], { type: 'application/javascript' }));
+                    ctx.prTapModule = ctx.audioWorklet.addModule(url).finally(() => URL.revokeObjectURL(url));
+                }
+                await ctx.prTapModule;
+                node = new AudioWorkletNode(ctx, 'pr-tap', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' });
+                const port = node.port;
+                port.onmessage = (e) => tapBlock(e.data);
+                start = () => port.postMessage(true);
+                stop = () => port.postMessage(false);
+            }
+        } catch (e) { node = null; ctx.prTapModule = null; }
+        if (!node && ctx.createScriptProcessor) {
+            // older browsers: the same thing on the main thread
+            let on = false;
+            node = ctx.createScriptProcessor(4096, 1, 1);
+            node.onaudioprocess = (e) => { if (on) tapBlock(new Float32Array(e.inputBuffer.getChannelData(0))); };
+            start = () => { on = true; };
+            stop = () => { on = false; };
+        }
+        if (!node) return;
+        if (micSource !== source) { try { node.disconnect(); } catch (e) { /* ignore */ } return; }   // microphone went off meanwhile
+        // The node only runs while it leads to the output. It writes nothing there, and the
+        // gain is zero as well: the microphone is never heard from the speaker.
+        const sink = ctx.createGain();
+        sink.gain.value = 0;
+        source.connect(node); node.connect(sink); sink.connect(ctx.destination);
+        tap = { node, sink, start, stop };
+    }
+    function stopTap() {
+        rawChunks = null; rawCount = 0;
+        if (!tap) return;
+        try { tap.stop(); tap.node.disconnect(); tap.sink.disconnect(); } catch (e) { /* ignore */ }
+        if (tap.node.port) tap.node.port.onmessage = null; else tap.node.onaudioprocess = null;
+        tap = null;
+    }
+    function takeRaw() {
+        const chunks = rawChunks, n = rawCount;
+        rawChunks = null; rawCount = 0;
+        if (tap) tap.stop();
+        if (!chunks || !n || !ctx) return null;
+        const samples = new Float32Array(n);
+        let at = 0;
+        chunks.forEach((c) => { samples.set(c, at); at += c.length; });
+        return { samples, sampleRate: ctx.sampleRate };
+    }
+
     async function toggleMic() {
         if (micBusy) return;
         if (micOn) { micOff(); return; }
@@ -466,6 +534,7 @@
             fastSpectrum = new Float32Array(fast.frequencyBinCount);
             micSource.connect(fine);   // analysis only: never routed to the speaker
             micSource.connect(fast);
+            startTap(micSource).catch(() => {});   // without it a clap is still measured, only its sound is not kept
             stream.getTracks().forEach((t) => { t.onended = () => { if (micStream === stream) micOff('The microphone was taken away by the system.'); }; });
             micOn = true;
             $('mic').textContent = 'Turn microphone off';
@@ -483,6 +552,7 @@
     function micOff(message) {
         clearInterval(meterTimer); meterTimer = null;
         cancelClap();
+        stopTap();
         recording = false;
         if (micSource) { try { micSource.disconnect(); } catch (e) { /* ignore */ } }
         if (micStream) micStream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
@@ -535,6 +605,8 @@
         clapRun++;
         clearInterval(clapTimer); clapTimer = null;
         clapBusy = false;
+        rawChunks = null; rawCount = 0;
+        if (tap) tap.stop();
         if (message) $('micWarn').textContent = message;
         setClapButton();
         setButtons();
@@ -590,8 +662,11 @@
                         settled = mean(levels.slice(n - 6)) >= mean(levels.slice(n - 12, n - 6)) - 1.5;
                     } else settled = false;
                 }
-                if (now >= maxStart || (now >= minStart && settled)) startMs = now;
-                else return;
+                if (now >= maxStart || (now >= minStart && settled)) {
+                    startMs = now;
+                    rawAudio = null; rawChunks = []; rawCount = 0;
+                    if (tap) tap.start();
+                } else return;
             }
             if (now < startMs + 4000) {
                 $('clap').textContent = 'Clap now…';
@@ -601,6 +676,7 @@
             }
             clearInterval(clapTimer); clapTimer = null;
             clapBusy = false;
+            rawAudio = takeRaw();
             curve = []; viewing = null;
             for (let k = k0; k <= k1; k++) if (Number.isFinite(hold[k - k0])) curve.push({ f: k * binHz, db: hold[k - k0] });
             curveKind = 'clap';
@@ -760,10 +836,12 @@
         $('saveBox').hidden = !can;
         $('saveBtn').disabled = curveState === 'saved';
         $('saveBtn').textContent = curveState === 'saved' ? 'Saved' : 'Save this measurement';
+        $('keepAudioRow').hidden = !(curveKind === 'clap' && rawAudio);
+        if (!$('keepAudioRow').hidden) $('keepAudioSize').textContent = (rawAudio.samples.length / rawAudio.sampleRate).toFixed(1) + ' s, ' + (rawAudio.samples.length * 4 / 1e6).toFixed(1) + ' MB';
     }
 
     // ---------- Saved measurements ----------
-    // Records live in IndexedDB ("records"), photos beside them ("photos", keyed by record id).
+    // Records live in IndexedDB ("records"), photos and raw sound beside them ("photos", "audio", keyed by record id).
     let db = null;
     let saved = [];                 // newest first
     const thumbs = new Map();       // record id -> object URL of its photo
@@ -773,11 +851,12 @@
     function openDb() {
         return new Promise((resolve, reject) => {
             if (!window.indexedDB) { reject(new Error('This browser has no storage for saved measurements.')); return; }
-            const rq = indexedDB.open('pyramid-res', 1);
+            const rq = indexedDB.open('pyramid-res', 2);
             rq.onupgradeneeded = () => {
                 const d = rq.result;
                 if (!d.objectStoreNames.contains('records')) d.createObjectStore('records', { keyPath: 'id' });
                 if (!d.objectStoreNames.contains('photos')) d.createObjectStore('photos');
+                if (!d.objectStoreNames.contains('audio')) d.createObjectStore('audio');
             };
             rq.onsuccess = () => resolve(rq.result);
             rq.onerror = () => reject(rq.error || new Error('Storage could not be opened.'));
@@ -814,7 +893,8 @@
             const box = el('div', null, 'rec');
             box.dataset.id = rec.id;
             box.appendChild(el('b', recTitle(rec)));
-            box.appendChild(el('p', (rec.kind === 'sweep' ? 'Sweep' : 'Clap') + ' ' + rec.fMin + '–' + rec.fMax + ' Hz · ' + R.peakSummary(rec, 4), 'hint'));
+            box.appendChild(el('p', (rec.kind === 'sweep' ? 'Sweep' : 'Clap') + ' ' + rec.fMin + '–' + rec.fMax + ' Hz · ' + R.peakSummary(rec, 4) +
+                (rec.audio ? ' · sound ' + rec.audio.durationS.toFixed(1) + ' s' : ''), 'hint'));
             const loc = el('p', locationLine(rec) + ' ', 'hint');
             loc.dataset.role = 'location';
             if (rec.location) { const a = el('a', 'map'); a.href = R.mapsUrl(rec.location); a.target = '_blank'; a.rel = 'noopener'; loc.appendChild(a); }
@@ -888,11 +968,17 @@
             sweepDurS: settings.sweepDur, speaker: settings.speaker,
             curve, peaks: lastPeaks, app: BUILD, locationStatus: 'pending',
         });
+        let wav = null;
+        if (curveKind === 'clap' && rawAudio && $('keepAudio').checked) {
+            rec.audio = R.audioInfo(rawAudio.samples.length, rawAudio.sampleRate);
+            if (rec.audio) wav = R.encodeWav(rawAudio.samples, rawAudio.sampleRate);
+        }
         curveState = 'saved';
         drawChart();
         startLocate(rec);       // before any await: a permission prompt needs the tap
         try {
-            await putRecord(rec);
+            if (wav) await tx(['records', 'audio'], 'readwrite', (t) => { t.objectStore('audio').put({ type: 'audio/wav', buffer: wav }, rec.id); return t.objectStore('records').put(rec); });
+            else await putRecord(rec);
         } catch (e) {
             curveState = 'done';
             drawChart();
@@ -995,13 +1081,17 @@
             const p = await tx('photos', 'readonly', (t) => t.objectStore('photos').get(rec.id));
             if (p) files.push(new File([p.buffer], base + '-photo.jpg', { type: 'image/jpeg' }));
         }
+        if (rec.audio) {
+            const a = await tx('audio', 'readonly', (t) => t.objectStore('audio').get(rec.id));
+            if (a) files.push(new File([a.buffer], base + '-sound.wav', { type: 'audio/wav' }));
+        }
         return { files, title: 'Resonance measurement', text: R.shareText(rec) };
     }
     function prepareAll() {
         const day = new Date().toISOString().slice(0, 10);
         const body = JSON.stringify(R.exportAll(saved.slice().reverse(), BUILD), null, 1);
         return { files: [new File([body], 'resonance-all-' + day + '.json', { type: 'application/json' })],
-            title: 'Resonance measurements', text: saved.length + ' resonance measurements. Photos are not in this file: send those one measurement at a time.' };
+            title: 'Resonance measurements', text: saved.length + ' resonance measurements. Photos and sound are not in this file: send those one measurement at a time.' };
     }
 
     function download(files) {
@@ -1054,7 +1144,7 @@
             setTimeout(() => { if (button.isConnected) { button.dataset.armed = ''; button.textContent = 'Delete'; } }, 4000);
             return;
         }
-        tx(['records', 'photos'], 'readwrite', (t) => { t.objectStore('photos').delete(rec.id); return t.objectStore('records').delete(rec.id); })
+        tx(['records', 'photos', 'audio'], 'readwrite', (t) => { t.objectStore('photos').delete(rec.id); t.objectStore('audio').delete(rec.id); return t.objectStore('records').delete(rec.id); })
             .then(() => {
                 saved = saved.filter((r) => r !== rec);
                 prepared.delete(rec.id); prepared.delete('all');
@@ -1087,7 +1177,7 @@
         mutate();
         sanitize(settings);
         if (voice || clapBusy) stopAll();
-        curve = []; curveKind = ''; curveState = 'none'; viewing = null; recording = false; $('peaks').textContent = '';
+        rawAudio = null; curve = []; curveKind = ''; curveState = 'none'; viewing = null; recording = false; $('peaks').textContent = '';
         if (!recompute()) {
             const message = $('roomWarn').textContent;
             Object.assign(settings, before);

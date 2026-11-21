@@ -66,6 +66,9 @@
         }
         input[type=range] { width: 100%; accent-color: var(--gold); height: 32px; }
         label { font-size: .8rem; color: var(--muted); display: grid; gap: 4px; }
+        label.check { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+        label.check[hidden] { display: none; }
+        label.check input { width: 22px; height: 22px; accent-color: var(--gold); flex: none; }
 
         .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
         .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
@@ -206,7 +209,7 @@
             <div id="meter"><div id="meterBar"></div></div>
             <div id="meterText">Microphone off</div>
             <p class="hint">Easiest check: turn the microphone on, stop any tone, and record one sharp clap. The room rings at its own notes and no speaker is needed.</p>
-            <p class="hint">Nothing is recorded or sent anywhere. On an iPhone, turning the microphone on can move the sound from a Bluetooth speaker to the phone itself. If the tone gets quiet, turn the microphone off and judge by ear, or use the clap.</p>
+            <p class="hint">Nothing is sent anywhere. The sound of a clap is kept only if you save that measurement with "Keep the sound" ticked; everything else is analysed and discarded. On an iPhone, turning the microphone on can move the sound from a Bluetooth speaker to the phone itself. If the tone gets quiet, turn the microphone off and judge by ear, or use the clap.</p>
             <p class="warn" id="micWarn"></p>
         </div>
 
@@ -219,6 +222,7 @@
                 <label class="mt">Place or note (optional)
                     <input type="text" id="saveNote" maxlength="120" autocomplete="off" placeholder="e.g. stairwell, 2nd floor">
                 </label>
+                <label class="mt check" id="keepAudioRow" hidden><input type="checkbox" id="keepAudio" checked><span>Keep the sound of the clap for later analysis (<span id="keepAudioSize"></span>)</span></label>
                 <div class="row mt"><button id="saveBtn">Save this measurement</button></div>
                 <p class="hint" id="saveMsg"></p>
             </div>
