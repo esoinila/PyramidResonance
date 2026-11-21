@@ -246,6 +246,40 @@
             <p class="hint" id="updateMsg" aria-live="polite"></p>
         </div>
     </main>
+    <script>
+        // Update plumbing. It lives here and not in app.js on purpose: if a release ever ships
+        // an app.js that does not start, this still fetches the next version and loads it.
+        (function () {
+            var reloadButton = document.getElementById('reload');
+            if (reloadButton) reloadButton.addEventListener('click', function () { location.reload(); });
+            if (!('serviceWorker' in navigator)) return;
+            var sw = navigator.serviceWorker, hadController = !!sw.controller;
+            // reg: the registration. ready: a newer version has taken over and waits for a reload.
+            // busy: set by app.js; true while a tone plays or the microphone is on.
+            var state = window.PyramidUpdate = { reg: null, ready: false, busy: null };
+            sw.addEventListener('controllerchange', function () {
+                if (!hadController) return;           // first install: this page is already the new version
+                state.ready = true;
+                var last = 0;
+                try { last = Number(sessionStorage.getItem('pyramid-res-reloaded-at')) || 0; } catch (e) { /* ignore */ }
+                var busy = typeof state.busy === 'function' && state.busy();
+                if (!busy && Date.now() - last > 15000) {     // the pause stops any reload loop
+                    try { sessionStorage.setItem('pyramid-res-reloaded-at', String(Date.now())); } catch (e) { /* ignore */ }
+                    location.reload();
+                    return;
+                }
+                var note = document.getElementById('updateNote');
+                if (note) note.hidden = false;
+            });
+            window.addEventListener('load', function () {
+                sw.register('./sw.js', { updateViaCache: 'none' }).then(function (reg) {
+                    state.reg = reg;
+                    // a home-screen app is often resumed, not relaunched: look for an update then too
+                    document.addEventListener('visibilitychange', function () { if (!document.hidden) reg.update().catch(function () {}); });
+                }).catch(function (err) { console.log('Service worker registration failed', err); });
+            });
+        })();
+    </script>
     <script src="modes.js"></script>
     <script src="records.js"></script>
     <script src="app.js"></script>

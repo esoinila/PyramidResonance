@@ -1,7 +1,7 @@
 // Offline first. Every file is fetched once, together, when this worker installs,
 // and is then served only from that cache: the app opens at once with no signal and
 // can never be a mix of two versions. To release a change, change VERSION here and
-// BUILD in app.js (and RELEASED in both): a changed sw.js is what makes a phone fetch the new set.
+// BUILD in app.js (and RELEASED in both) with "node scripts/release.js <version>": a changed sw.js is what makes a phone fetch the new set.
 const VERSION = '2.2.2';
 const RELEASED = '2026-11-21T17:52:00Z';   // when this version was published; the same value is in app.js
 const CACHE_NAME = 'pyramid-res-' + VERSION;
@@ -12,7 +12,11 @@ self.addEventListener('install', (event) => {
     // all or nothing: if one file fails, the old version stays in charge
     event.waitUntil(
         caches.open(CACHE_NAME)
-            .then((cache) => cache.addAll(ASSETS.map((url) => new Request(url, { cache: 'reload' }))))
+            .then((cache) => cache.addAll(ASSETS.map((url) => new Request(url, { cache: 'reload' })))
+                // the server can hand out this new sw.js a little before the new app.js:
+                // refuse to install unless the app.js that arrived is this version's
+                .then(() => cache.match('./app.js')).then((res) => res.text())
+                .then((text) => { if (!text.includes("const BUILD = '" + VERSION + "'")) throw new Error('app.js is not version ' + VERSION + ' yet'); }))
             .then(() => self.skipWaiting())
             .catch((err) => caches.delete(CACHE_NAME).then(() => { throw err; }))
     );

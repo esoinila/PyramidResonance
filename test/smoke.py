@@ -438,29 +438,74 @@ async def main():
         bump('app.js', r"const RELEASED = '[^']+'", "const RELEASED = '2027-03-10T12:00:00Z'")
         os.rename(os.path.join(site, 'modes.js'), os.path.join(site, 'modes.js.away'))
         await ctx.set_offline(False)
+        async def build_is(text, timeout=15000):
+            try:
+                await page.wait_for_function("document.getElementById('build') && document.getElementById('build').textContent === %r" % text, timeout=timeout)
+                return True
+            except Exception:
+                return False
+        async def caches_settle(expected):
+            for _ in range(40):
+                names = await page.evaluate("caches.keys().then(k => k.join())")
+                if names == expected: return names
+                await page.wait_for_timeout(250)
+            return names
+        await page.click('#checkUpdate')
+        try:
+            await page.wait_for_function("updateMsg.textContent.includes('failed part way')", timeout=15000); said = True
+        except Exception:
+            said = False
+        check(said, '"Check for update" finds the new version and says when its download fails', await page.evaluate("updateMsg.textContent"))
+        check('Version 9.9.9, published' in await page.evaluate("updateMsg.textContent"), 'and names the version and its publication time')
+        names = await caches_settle('pyramid-res-' + v1.split()[1])
+        check(names == 'pyramid-res-' + v1.split()[1], 'the failed update left no second cache behind', names)
+        await page.reload()
+        check(await page.evaluate("build.textContent") == v1 and await page.evaluate("modeList.children.length") > 10, 'a half-downloaded update leaves the old version running', await page.evaluate("build.textContent"))
+
+        # the server hands out the new sw.js before the new app.js: the install must refuse
+        os.rename(os.path.join(site, 'modes.js.away'), os.path.join(site, 'modes.js'))
+        new_app = open(os.path.join(site, 'app.js')).read()
+        open(os.path.join(site, 'app.js'), 'w').write(open(os.path.join(ROOT, 'app.js')).read())
+        later = os.path.getmtime(os.path.join(site, 'app.js')) + 30; os.utime(os.path.join(site, 'app.js'), (later, later))
         await page.evaluate("navigator.serviceWorker.getRegistration().then(r => r.update()).catch(() => 0)")
         await page.wait_for_timeout(1500)
-        await page.reload()
-        check(await page.evaluate("caches.keys().then(k => k.join())") == 'pyramid-res-' + v1.split()[1], 'the failed update left no second cache behind', await page.evaluate("caches.keys().then(k => k.join())"))
-        check(await page.evaluate("build.textContent") == v1 and await page.evaluate("modeList.children.length") > 10, 'a half-downloaded update leaves the old version running', await page.evaluate("build.textContent"))
-        os.rename(os.path.join(site, 'modes.js.away'), os.path.join(site, 'modes.js'))
+        names = await caches_settle('pyramid-res-' + v1.split()[1])
+        check(names == 'pyramid-res-' + v1.split()[1], 'a new sw.js with the old app.js is not installed', names)
+        open(os.path.join(site, 'app.js'), 'w').write(new_app)
+        later += 30; os.utime(os.path.join(site, 'app.js'), (later, later))
+
+        # now the update can complete: one tap, and an idle page reloads itself into it
         await page.click('#checkUpdate')
-        await page.wait_for_function("updateMsg.textContent.includes('Version 9.9.9') || document.getElementById('build').textContent === 'Version 9.9.9'", timeout=10000)
-        check(True, '"Check for update" finds the new version and starts the download')
-        # now the update can complete: an idle page reloads itself into it
-        ok = False
-        for _ in range(10):
+        check(await build_is('Version 9.9.9'), 'after "Check for update" a complete update loads by itself when nothing is playing', await page.evaluate("build.textContent"))
+        await page.click('#checkUpdate')
+        await page.wait_for_function("updateMsg.textContent.includes('newest version')", timeout=10000)
+
+        # a release whose app.js does not even start must still be replaceable by the next one
+        def publish(version, app_text):
+            src = re.sub(r"const BUILD = '[^']+'", "const BUILD = '%s'" % version, app_text, count=1)
+            for name, text in (('app.js', src), ('sw.js', re.sub(r"const VERSION = '[^']+'", "const VERSION = '%s'" % version, open(os.path.join(site, 'sw.js')).read(), count=1))):
+                path = os.path.join(site, name); stamp = os.path.getmtime(path) + 60
+                open(path, 'w').write(text); os.utime(path, (stamp, stamp))
+        good_app = open(os.path.join(site, 'app.js')).read()
+        await page.wait_for_timeout(16000)     # past the pause that guards against reload loops
+        publish('9.9.10', good_app.replace("'use strict';", "'use strict'; const broken = /(/;", 1))
+        await page.evaluate("navigator.serviceWorker.getRegistration().then(r => r.update()).catch(() => 0)")
+        dead = False
+        for _ in range(60):                    # the page reloads while we look, so ask again after a failed look
             try:
-                await page.evaluate("navigator.serviceWorker.getRegistration().then(r => r.update()).catch(() => 0)")
-                await page.wait_for_function("document.getElementById('build') && document.getElementById('build').textContent === 'Version 9.9.9'", timeout=2000)
-                ok = True
-                break
+                if await page.evaluate("document.readyState === 'complete' && document.getElementById('build').textContent === ''"): dead = True; break
             except Exception:
                 pass
-        check(ok, 'a complete update loads by itself when nothing is playing', await page.evaluate("build.textContent"))
+            await page.wait_for_timeout(250)
+        check(dead, '(test setup) the broken release took over and its page does not start', await page.evaluate("build.textContent"))
+        await page.wait_for_timeout(16000)
+        publish('9.9.11', good_app)
+        await page.reload()                    # what opening the app again does: the browser itself looks for a new sw.js
+        check(await build_is('Version 9.9.11', 20000), 'a release that does not start is replaced by the next one after one reopening', await page.evaluate("build.textContent"))
+        errors[:] = [e for e in errors if 'regular expression' not in e and 'Invalid' not in e]
         await ctx.set_offline(True)
         await page.reload()
-        check(await page.evaluate("build.textContent") == 'Version 9.9.9' and await page.evaluate("modeList.children.length") > 10, 'and the new version then works offline')
+        check(await page.evaluate("build.textContent") == 'Version 9.9.11' and await page.evaluate("modeList.children.length") > 10, 'and the new version then works offline')
         check(not errors, 'no page errors (offline and update)', errors)
         srv2.shutdown(); shutil.rmtree(site, ignore_errors=True)
         await browser.close()

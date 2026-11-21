@@ -209,13 +209,43 @@ test('app.js BUILD and sw.js VERSION are the same, and every cached file exists'
   for (const f of ['app.js', 'sw.js', 'modes.js', 'records.js']) {
     assert.doesNotThrow(() => new (require('node:vm').Script)(fs.readFileSync(path.join(__dirname, '..', f), 'utf8'), { filename: f }), f + ' must parse');
   }
+  // the page's own scripts (the update plumbing) must parse too, and must be there
+  const page = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+  const inline = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+  assert.ok(inline.some((code) => code.includes("register('./sw.js'") && code.includes('controllerchange')), 'index.html registers the service worker itself');
+  inline.forEach((code, i) => assert.doesNotThrow(() => new (require('node:vm').Script)(code), 'inline script ' + i + ' must parse'));
+  assert.ok(!/serviceWorker\.register/.test(app), 'app.js must not register the service worker: a broken app.js could then never be replaced');
   assert.ok(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(relApp) && Number.isFinite(new Date(relApp).getTime()), 'RELEASED is a UTC time');
   const assets = sw.match(/const ASSETS = \[([^\]]+)\]/)[1].match(/'[^']+'/g).map((s) => s.slice(1, -1));
   assert.ok(assets.length >= 9);
   for (const a of assets) if (a !== './') assert.ok(fs.existsSync(path.join(root, a)), a);
+  assert.ok(!assets.some((a) => /sw\.js$/.test(a)), 'sw.js must never be in the offline cache, or updates stop');
   // every id the script looks up exists in the page
   const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
   for (const m of app.matchAll(/\$\('([A-Za-z]+)'\)/g)) assert.ok(html.includes('id="' + m[1] + '"'), 'missing id ' + m[1]);
+});
+
+test('scripts/release.js stamps only the declarations and leaves working code', () => {
+  const fs = require('node:fs'), path = require('node:path'), os = require('node:os'), { spawnSync } = require('node:child_process');
+  const root = path.join(__dirname, '..');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pyramid-release-'));
+  for (const f of ['app.js', 'sw.js']) fs.copyFileSync(path.join(root, f), path.join(tmp, f));
+  const r = spawnSync('node', [path.join(root, 'scripts', 'release.js'), '7.8.9', '--root', tmp, '--stamp-only'], { encoding: 'utf8' });
+  assert.strictEqual(r.status, 0, r.stderr);
+  const changed = (f) => {
+    const a = fs.readFileSync(path.join(root, f), 'utf8').split('\n'), b = fs.readFileSync(path.join(tmp, f), 'utf8').split('\n');
+    assert.strictEqual(a.length, b.length);
+    return b.filter((line, i) => line !== a[i]);
+  };
+  const app = changed('app.js'), sw = changed('sw.js');
+  assert.strictEqual(app.length, 2, 'two lines change in app.js: ' + app.join(' | '));
+  assert.strictEqual(sw.length, 2, 'two lines change in sw.js: ' + sw.join(' | '));
+  assert.ok(app.some((l) => /^\s*const BUILD = '7\.8\.9';/.test(l)) && sw.some((l) => /^const VERSION = '7\.8\.9';/.test(l)));
+  const when = (lines) => lines.map((l) => (l.match(/const RELEASED = '([^']+)'/) || [])[1]).find(Boolean);
+  assert.ok(/^\d{4}-\d\d-\d\dT\d\d:\d\d:00Z$/.test(when(app)) && when(app) === when(sw));
+  for (const f of ['app.js', 'sw.js']) assert.doesNotThrow(() => new (require('node:vm').Script)(fs.readFileSync(path.join(tmp, f), 'utf8')), f + ' still parses');
+  assert.notStrictEqual(spawnSync('node', [path.join(root, 'scripts', 'release.js'), 'banana', '--root', tmp, '--stamp-only']).status, 0);
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 // ---------- saved measurements (records.js) ----------
