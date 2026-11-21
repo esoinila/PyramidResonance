@@ -358,7 +358,7 @@
         if (clapBusy) return;
         if (voice && voice.kind === 'sweep') { stopAll(); return; }
         if (!(settings.fMax > settings.fMin)) {
-            $('audioWarn').textContent = 'Set "To Hz" higher than "From Hz" in the Room card first.';
+            $('audioWarn').textContent = 'Set "To Hz" higher than "From Hz" on the Setup tab first.';
             return;
         }
         leaveViewing();
@@ -608,7 +608,7 @@
     async function recordClap() {
         if (!micOn || clapBusy || micBusy) return;
         if (!(settings.fMax > settings.fMin)) {
-            $('micWarn').textContent = 'Set "To Hz" higher than "From Hz" in the Room card first.';
+            $('micWarn').textContent = 'Set "To Hz" higher than "From Hz" on the Setup tab first.';
             return;
         }
         if (voice) stopAll();
@@ -979,7 +979,7 @@
             return;
         }
         saved.unshift(rec);
-        $('saveMsg').textContent = 'Saved. It is in the list below, where you can add a photo or send it.';
+        $('saveMsg').textContent = 'Saved. It is on the Saved tab, where you can add a photo or send it.';
         $('saveNote').value = '';
         renderSaved();
         // ask the browser not to clear this data when the phone runs low on space
@@ -1005,7 +1005,7 @@
             });
             host.appendChild(table);
         } else note('No clear peaks in this measurement.');
-        note('This is a saved measurement' + (rec.location ? ' from ' + R.formatLocation(rec.location) : '') + '. A new clap or sweep replaces it on screen; the saved copy stays in the list.');
+        note('This is a saved measurement' + (rec.location ? ' from ' + R.formatLocation(rec.location) : '') + '. A new clap or sweep replaces it on screen; the saved copy stays on the Saved tab.');
         showTab('measure');     // the chart lives there
         drawChart();
         if ($('chartTitle').scrollIntoView) $('chartTitle').scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -1170,6 +1170,7 @@
     function showTab(name, byUser) {
         if (!CHOICES.tab.includes(name)) name = DEFAULTS.tab;
         const changed = settings.tab !== name;
+        if (byUser && !changed) return;     // tapping the open tab again must not disturb anything on it
         settings.tab = name;
         if (byUser) save();
         CHOICES.tab.forEach((t) => {
@@ -1186,8 +1187,16 @@
     }
     // marks on the tab buttons, so that a tone or an open microphone is never out of sight
     function tabMarks() {
-        $('dotPlay').hidden = !voice;
-        $('dotMeasure').hidden = !(micOn || clapBusy);
+        const sweeping = !!voice && voice.kind === 'sweep';
+        $('dotPlay').hidden = !voice || sweeping;
+        $('dotMeasure').hidden = !(micOn || clapBusy || sweeping);
+        // Stop, the frequency and the level stay in reach on every tab while something sounds
+        $('strip').hidden = !voice;
+        if (voice) $('stripText').textContent = $('nowFreq').textContent + (micOn ? ' · ' + $('meterText').textContent : '');
+        // a warning written on a tab that is not open is repeated here, so nothing fails silently
+        const notes = [$('audioWarn').textContent, settings.tab === 'measure' ? '' : $('micWarn').textContent].filter(Boolean).join(' ');
+        if ($('notice').textContent !== notes) $('notice').textContent = notes;
+        $('notice').hidden = !notes;
     }
 
     // ---------- Version check ----------
@@ -1309,6 +1318,7 @@
     $('prev').addEventListener('click', () => playMode(lastIdx < 0 ? shown.length - 1 : lastIdx - 1));
     $('next').addEventListener('click', () => playMode(lastIdx + 1));
     $('stop').addEventListener('click', stopAll);
+    $('stripStop').addEventListener('click', stopAll);
     $('sweep').addEventListener('click', toggleSweep);
     $('mic').addEventListener('click', toggleMic);
     $('clap').addEventListener('click', recordClap);
@@ -1326,9 +1336,11 @@
         $('tabBtn-' + t).addEventListener('click', () => showTab(t, true));
         // arrow keys move between tabs, as a tab list should
         $('tabBtn-' + t).addEventListener('keydown', (e) => {
-            const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
-            if (!step) return;
-            const next = CHOICES.tab[(i + step + CHOICES.tab.length) % CHOICES.tab.length];
+            const last = CHOICES.tab.length - 1;
+            const to = e.key === 'ArrowRight' ? (i + 1) % (last + 1) : e.key === 'ArrowLeft' ? (i + last) % (last + 1) : e.key === 'Home' ? 0 : e.key === 'End' ? last : -1;
+            if (to < 0 || to === i) return;
+            e.preventDefault();
+            const next = CHOICES.tab[to];
             showTab(next, true);
             $('tabBtn-' + next).focus();
         });

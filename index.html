@@ -79,12 +79,17 @@
         .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
         .warn { color: var(--bad); font-size: .85rem; margin: 8px 0 0; min-height: 1.2em; }
 
-        #tabs { position: sticky; top: 0; z-index: 5; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; background: var(--bg); padding: calc(6px + env(safe-area-inset-top)) 0 8px; margin-top: 6px; }
+        #top { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 6px 0 8px; margin-top: 6px; }
+        #tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
         #tabs button { padding: 10px 2px; min-height: 44px; font-size: .95rem; background: transparent; color: var(--muted); border: 1px solid var(--line); }
         #tabs button[aria-selected="true"] { color: #000; background: var(--gold); border-color: var(--gold); font-weight: 700; }
         #tabs .dot { color: var(--bad); }
         #tabs button[aria-selected="true"] .dot { color: #7a0000; }
-        .tab[hidden] { display: none; }
+        #strip { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+        #strip button { flex: none; min-height: 44px; padding: 8px 16px; }
+        #stripText { color: var(--muted); font-size: .9rem; font-variant-numeric: tabular-nums; }
+        #notice { margin: 8px 0 0; min-height: 0; }
+        #chartTitle { scroll-margin-top: 130px; }   /* clear of the sticky bar when scrolled to */
 
         #now { text-align: center; padding: 8px 0 2px; }
         #nowFreq { font-size: 2.2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -130,12 +135,21 @@
             <div class="row mt"><button id="reload">Load the new version</button></div>
         </div>
 
-        <div id="tabs" role="tablist" aria-label="Sections">
-            <button role="tab" id="tabBtn-measure" data-tab="measure" aria-controls="tab-measure">Measure<span class="dot" id="dotMeasure" hidden> ●</span></button>
-            <button role="tab" id="tabBtn-play" data-tab="play" aria-controls="tab-play">Play<span class="dot" id="dotPlay" hidden> ♪</span></button>
-            <button role="tab" id="tabBtn-saved" data-tab="saved" aria-controls="tab-saved">Saved</button>
-            <button role="tab" id="tabBtn-setup" data-tab="setup" aria-controls="tab-setup">Setup</button>
+        <div id="top">
+            <div id="tabs" role="tablist" aria-label="Sections">
+                <button role="tab" id="tabBtn-measure" data-tab="measure" aria-controls="tab-measure">Measure<span id="dotMeasure" hidden><span class="dot" aria-hidden="true"> ●</span><span class="sr"> (microphone or sweep on)</span></span></button>
+                <button role="tab" id="tabBtn-play" data-tab="play" aria-controls="tab-play">Play<span id="dotPlay" hidden><span class="dot" aria-hidden="true"> ♪</span><span class="sr"> (a tone is playing)</span></span></button>
+                <button role="tab" id="tabBtn-saved" data-tab="saved" aria-controls="tab-saved">Saved</button>
+                <button role="tab" id="tabBtn-setup" data-tab="setup" aria-controls="tab-setup">Setup</button>
+            </div>
+            <!-- Always in reach while anything sounds, whichever tab is open -->
+            <div id="strip" hidden>
+                <button id="stripStop">■ Stop</button>
+                <span id="stripText"></span>
+            </div>
+            <p class="warn" id="notice" hidden></p>
         </div>
+        <p class="sr" id="say" aria-live="polite"></p>
         <!-- All four sections are in this one page; switching only shows and hides them, so it never needs a network. -->
 
         <section class="tab" id="tab-measure" role="tabpanel" aria-labelledby="tabBtn-measure">
@@ -188,7 +202,7 @@
             <div class="row mt">
                 <button id="sweep">Start sweep</button>
             </div>
-            <p class="hint">Glides slowly from "From Hz" to "To Hz". With the microphone on, the level is plotted in the chart above. The speaker choice corrects for the delay a Bluetooth speaker adds.</p>
+            <p class="hint">Glides slowly from "From Hz" to "To Hz" (both in Setup). With the microphone on, the level is plotted in the chart above. The speaker choice corrects for the delay a Bluetooth speaker adds.</p>
         </div>
 
         <div id="nowSlotMeasure"></div>
@@ -206,7 +220,6 @@
                 <button id="stop" disabled>Stop</button>
             </div>
             <p class="warn" id="audioWarn"></p>
-            <p class="sr" id="say" aria-live="polite"></p>
         </div>
         </div>
 
