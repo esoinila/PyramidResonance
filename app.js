@@ -936,18 +936,27 @@
         if (writing) p.then(() => { pendingWrites--; }, () => { pendingWrites--; });
         return p;
     }
+    // Every write goes through here: the phone may have closed the connection while the app was in the
+    // background, so a failed first try is repeated once on a new connection before it counts as a failure.
+    async function dbWrite(stores, work) {
+        try { await ensureDb(); return await tx(stores, 'readwrite', work); } catch (e) { dropDb(); }
+        await ensureDb();
+        try { return await tx(stores, 'readwrite', work); } catch (e) { dropDb(); throw e; }
+    }
     const deleted = new Set();      // ids the user deleted: a write still in flight must not bring them back
     const inFlight = new Set();     // records being written right now
     // What goes to the phone for a record whose sound is still only in memory: honest about the missing sound
-    const dbCopy = (rec) => (unstored.has(rec) && memAudio.has(rec.id) ? Object.assign({}, rec, { audio: null, audioMissing: true }) : rec);
+    // (audioPending keeps the sound's description, so that if the sound did reach storage after all it is found again at the next start)
+    const dbCopy = (rec) => (unstored.has(rec) && memAudio.has(rec.id) ? Object.assign({}, rec, { audio: null, audioMissing: true, audioPending: rec.audio }) : rec);
     // Any change to a record after it was sent means the copy outside the phone is out of date
     function touched(rec) { rec.sentAt = null; prepared.delete(rec.id); prepared.delete('all'); }
     // A record still held in memory is written whole by storeRecord, so a small update only needs to wait for that.
     const putRecord = (rec) => {
         prepared.delete(rec.id); prepared.delete('all');
         if (deleted.has(rec.id)) return Promise.resolve();
-        if (unstored.has(rec) && !memAudio.has(rec.id)) return Promise.resolve();   // storeRecord writes it whole
-        return ensureDb().then(() => tx('records', 'readwrite', (t) => t.objectStore('records').put(dbCopy(rec))));
+        // being written right now, or waiting to be: storeRecord writes the whole record, and once more when it is done
+        if (inFlight.has(rec) || (unstored.has(rec) && !memAudio.has(rec.id))) return Promise.resolve();
+        return dbWrite('records', (t) => t.objectStore('records').put(dbCopy(rec)));
     };
     // Writes a record and its sound. On failure the record stays in memory and in the list; if only
     // the sound did not fit, the spectrum is written alone (marked as without sound) and the sound stays in memory.
@@ -956,31 +965,24 @@
         inFlight.add(rec);
         const wav = memAudio.get(rec.id) || null;
         let ok = false;
-        const write = async () => {
-            await ensureDb();
-            if (wav) await tx(['records', 'audio'], 'readwrite', (t) => { t.objectStore('audio').put({ type: 'audio/wav', buffer: wav }, rec.id); return t.objectStore('records').put(rec); });
-            else await tx('records', 'readwrite', (t) => t.objectStore('records').put(rec));
-        };
         try {
-            // the phone may have closed the connection while the app was in the background:
-            // a failed first try is repeated at once on a new connection before anything is called a failure
-            try { await write(); } catch (e) { dropDb(); await write(); }
+            if (wav) await dbWrite(['records', 'audio'], (t) => { t.objectStore('audio').put({ type: 'audio/wav', buffer: wav }, rec.id); return t.objectStore('records').put(rec); });
+            else await dbWrite('records', (t) => t.objectStore('records').put(rec));
             unstored.delete(rec);
             memAudio.delete(rec.id);
             ok = true;
             checkpointStored(rec.id);
             // a location or note that arrived while that write was under way is in memory only: write once more
-            if (!deleted.has(rec.id)) await tx('records', 'readwrite', (t) => t.objectStore('records').put(rec)).catch(() => {});
+            if (!deleted.has(rec.id)) await dbWrite('records', (t) => t.objectStore('records').put(rec)).catch(() => {});
         } catch (e) {
             storeError = e && e.message ? e.message : 'storage error';
-            dropDb();       // whatever went wrong, the next try starts from a fresh connection
             if (wav && unstored.has(rec) && !deleted.has(rec.id)) {
-                try { await ensureDb(); await tx('records', 'readwrite', (t) => t.objectStore('records').put(dbCopy(rec))); } catch (e2) { dropDb(); }
+                try { await dbWrite('records', (t) => t.objectStore('records').put(dbCopy(rec))); } catch (e2) { /* still in memory */ }
             }
         }
         inFlight.delete(rec);
         // deleted while it was being written: take it out again
-        if (deleted.has(rec.id)) ensureDb().then(() => tx(['records', 'photos', 'audio'], 'readwrite', (t) => { t.objectStore('photos').delete(rec.id); t.objectStore('audio').delete(rec.id); return t.objectStore('records').delete(rec.id); })).catch(() => {});
+        if (deleted.has(rec.id)) dbWrite(['records', 'photos', 'audio'], (t) => { t.objectStore('photos').delete(rec.id); t.objectStore('audio').delete(rec.id); return t.objectStore('records').delete(rec.id); }).catch(() => {});
         return ok;
     }
     let retrying = false;
@@ -1028,18 +1030,21 @@
         return p;
     }
     const noteTimers = new Map();   // record id -> timer of a note waiting to be written
+    function summaries() {
+        const unsent = saved.filter((r) => !r.sentAt).length;
+        $('savedCount').textContent = saved.length ? ' ' + saved.length : '';
+        $('savedSummary').textContent = saved.length ? saved.length + (saved.length === 1 ? ' measurement' : ' measurements') + ' on this phone, ' + (unsent ? unsent + ' not sent yet.' : 'all sent.') : '';
+        $('recentTitle').textContent = saved.length + ' saved on this phone' + (unsent ? ', ' + unsent + ' not sent yet' : ', all sent') + '. Newest first' + (saved.length > 5 ? ' (the last 5; all are on the Saved tab)' : '') + ':';
+    }
     function renderSaved() {
         const host = $('savedList');
         // the list is rebuilt while a note may be being typed (a location arrives): keep the cursor where it was
         const active = document.activeElement, typing = active && active.classList && active.classList.contains('recNote') ? { id: active.dataset.id, at: active.selectionStart } : null;
         host.textContent = '';
         $('savedEmpty').hidden = saved.length > 0;
-        $('savedCount').textContent = saved.length ? ' ' + saved.length : '';
-        const unsent = saved.filter((r) => !r.sentAt).length;
-        $('savedSummary').textContent = saved.length ? saved.length + (saved.length === 1 ? ' measurement' : ' measurements') + ' on this phone, ' + (unsent ? unsent + ' not sent yet.' : 'all sent.') : '';
+        summaries();
         // the newest few are also listed right under the chart, so each new measurement is seen to arrive
         $('recentBox').hidden = saved.length === 0;
-        $('recentTitle').textContent = saved.length + ' saved on this phone' + (unsent ? ', ' + unsent + ' not sent yet' : ', all sent') + '. Newest first' + (saved.length > 5 ? ' (the last 5; all are on the Saved tab)' : '') + ':';
         $('recentList').textContent = '';
         saved.slice(0, 5).forEach((rec) => {
             const b = document.createElement('button'), t = document.createElement('b');
@@ -1072,19 +1077,21 @@
             note.placeholder = 'Note for this measurement'; note.value = rec.note || ''; note.dataset.id = rec.id;
             note.setAttribute('aria-label', 'Note for the measurement of ' + recTitle(rec));
             const writeNote = () => { noteTimers.delete(rec.id); putRecord(rec).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.')); };
+            // only this record's own lines are refreshed: rebuilding the list here would swallow the tap that ended the typing
+            const marks = () => { const old = box.querySelector('.flags'); if (old) old.replaceWith(flagLine(rec)); title.textContent = recTitle(rec); summaries(); };
             note.addEventListener('input', () => {
                 rec.note = note.value.slice(0, 200);
                 touched(rec);
-                title.textContent = recTitle(rec);
+                marks();
                 clearTimeout(noteTimers.get(rec.id));
                 noteTimers.set(rec.id, setTimeout(writeNote, 400));
             });
             note.addEventListener('change', () => {
                 const text = note.value.trim().slice(0, 200);
                 if (text !== rec.note) { rec.note = text; touched(rec); }
+                marks();
                 clearTimeout(noteTimers.get(rec.id));
                 writeNote();
-                renderSaved();      // the "sent" mark may have changed
             });
             box.appendChild(note);
             if (rec.photo) {
@@ -1142,7 +1149,7 @@
                     lat: c.latitude, lon: c.longitude, accuracyM: c.accuracy,
                     altitudeM: c.altitude, altitudeAccuracyM: c.altitudeAccuracy, time: new Date(pos.timestamp).toISOString(),
                 });
-                if (rec.location !== before && rec.sentAt) touched(rec);
+                if (rec.sentAt && JSON.stringify(rec.location) !== JSON.stringify(before)) touched(rec);
                 if (rec.location && rec.location.accuracyM != null && rec.location.accuracyM <= 10) finish('ok');
                 else if (saved.includes(rec)) putRecord(rec).catch(() => {}).then(renderSaved);
             }, (err) => {
@@ -1207,9 +1214,17 @@
     }
     // If the phone kills the app in the middle of a sweep no code runs, so nothing could be saved then.
     // The points measured so far are therefore noted down every two seconds, and picked up at the next start.
-    const CHECKPOINT = 'pyramid-res-sweep-checkpoint';
+    const CHECKPOINT = 'pyramid-res-sweep-';      // + the id of the sweep: each sweep has its own safety copy
     let checkpointAt = 0;
-    let sweepId = null;         // the id the running sweep will be saved under; its checkpoint carries the same one
+    let sweepId = null;         // the id the running sweep will be saved under; its safety copy carries the same one
+    // What an earlier run of the app left behind is read once, now, before this run can write any of its own
+    const leftBehind = [];
+    try {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key.indexOf(CHECKPOINT) === 0) { try { leftBehind.push(JSON.parse(localStorage.getItem(key))); } catch (e) { /* unreadable: skipped */ } }
+        }
+    } catch (e) { /* no localStorage */ }
     function checkpointSweep() {
         const now = Date.now();
         if (now - checkpointAt < 2000 || !recording || curveKind !== 'sweep') return;
@@ -1217,7 +1232,7 @@
         const d = roomDims();
         if (!sweepId) sweepId = R.makeRecord({ kind: 'sweep' }).id;
         try {
-            localStorage.setItem(CHECKPOINT, JSON.stringify(R.makeRecord({
+            localStorage.setItem(CHECKPOINT + sweepId, JSON.stringify(R.makeRecord({
                 id: sweepId, time: new Date(), kind: 'sweep', note: $('saveNote').value,
                 room: { name: settings.room, lengthM: d.L, widthM: d.W, heightM: d.H },
                 tempC: settings.temp, fMin: settings.fMin, fMax: settings.fMax, sweepDurS: settings.sweepDur, speaker: settings.speaker,
@@ -1225,33 +1240,35 @@
             })));
         } catch (e) { /* no room for it: the sweep itself goes on */ }
     }
-    function clearCheckpoint() { checkpointAt = 0; try { localStorage.removeItem(CHECKPOINT); } catch (e) { /* ignore */ } }
-    // The note of a sweep is thrown away only once that very sweep is safely in the phone storage
-    function checkpointStored(id) {
-        try { const c = JSON.parse(localStorage.getItem(CHECKPOINT) || 'null'); if (c && c.id === id) clearCheckpoint(); } catch (e) { /* ignore */ }
-    }
-    async function recoverCheckpoint() {
-        let rec = null;
-        try { rec = JSON.parse(localStorage.getItem(CHECKPOINT) || 'null'); } catch (e) { rec = null; }
-        if (!rec || rec.schema !== R.SCHEMA || !Array.isArray(rec.curve) || !rec.curve.length || saved.some((r) => r.id === rec.id)) { clearCheckpoint(); return; }
-        const points = rec.curve.map((p) => ({ f: p[0], db: p[1] }));
-        rec.peaks = R.makeRecord({ kind: 'sweep', curve: points, peaks: points.length > 10 ? M.findPeaks(points, 4) : [] }).peaks;
-        saved.unshift(rec);
+    // The safety copy of a sweep is thrown away only once that very sweep is in the phone storage (or measured nothing)
+    function checkpointStored(id) { if (id) { try { localStorage.removeItem(CHECKPOINT + id); } catch (e) { /* ignore */ } } }
+    async function recoverCheckpoints() {
+        let got = 0, stored = 0, points = 0;
+        for (const rec of leftBehind.splice(0)) {
+            if (!rec || !rec.id) continue;
+            if (rec.id === sweepId) continue;                                   // the sweep running right now
+            const ok = rec.schema === R.SCHEMA && Array.isArray(rec.curve) && rec.curve.length > 0;
+            if (!ok || deleted.has(rec.id) || saved.some((r) => r.id === rec.id)) { checkpointStored(rec.id); continue; }   // nothing in it, or already saved
+            const pts = rec.curve.map((p) => ({ f: p[0], db: p[1] }));
+            rec.peaks = R.makeRecord({ kind: 'sweep', curve: pts, peaks: pts.length > 10 ? M.findPeaks(pts, 4) : [] }).peaks;
+            saved.push(rec);
+            unstored.add(rec);
+            got++; points += pts.length;
+            if (await storeRecord(rec)) stored++;
+        }
+        if (!got) return;
         saved.sort((a, b) => (a.time < b.time ? 1 : -1));
-        unstored.add(rec);
-        renderSaved();
-        const ok = await storeRecord(rec);
         renderSaved();
         tabMarks();
-        saveNote('The app was closed in the middle of a sweep last time. What it had measured up to then (' + rec.curve.length + ' points) was recovered and ' +
-            (ok ? 'saved' : 'is in the list, NOT STORED yet') + ': it is on the Saved tab, marked "interrupted".', !ok);
+        saveNote('The app was closed in the middle of ' + (got === 1 ? 'a sweep' : got + ' sweeps') + ' last time. What had been measured up to then (' + points + ' points) was recovered and ' +
+            (stored === got ? 'saved' : 'is in the list, NOT STORED yet') + ': on the Saved tab, marked "interrupted".', stored !== got);
     }
 
     // A sweep cut short (Stop, the microphone taken away, a tone or setting chosen) still holds real data: keep it.
     function keepPartialSweep() {
         if (!(recording && curveKind === 'sweep')) return;
         recording = false;
-        if (curve.length < 1) { clearCheckpoint(); saveNote('That sweep measured nothing, so there was nothing to save.'); return; }
+        if (curve.length < 1) { checkpointStored(sweepId); sweepId = null; saveNote('That sweep measured nothing, so there was nothing to save.'); return; }
         curveState = 'done';
         showPeaks(curve.length > 10 ? M.findPeaks(curve, 4) : []);
         autoSave(true);
@@ -1319,7 +1336,6 @@
         const url = URL.createObjectURL(file);
         photoBusy = true;
         try {
-            await ensureDb();
             const img = new Image();
             img.src = url;
             await img.decode();
@@ -1337,7 +1353,7 @@
             const old = rec.photo, oldSent = rec.sentAt;
             rec.photo = info;
             try {
-                await tx(['records', 'photos'], 'readwrite', (t) => { t.objectStore('photos').put({ type: 'image/jpeg', buffer }, rec.id); return t.objectStore('records').put(dbCopy(rec)); });
+                await dbWrite(['records', 'photos'], (t) => { t.objectStore('photos').put({ type: 'image/jpeg', buffer }, rec.id); return t.objectStore('records').put(dbCopy(rec)); });
             } catch (e) { rec.photo = old; rec.sentAt = oldSent; throw e; }
             touched(rec);           // also drops a prepared "send all" that would lack this photo
             if (thumbs.has(rec.id)) { URL.revokeObjectURL(thumbs.get(rec.id)); thumbs.delete(rec.id); }
@@ -1481,7 +1497,7 @@
         const wasUnstored = unstored.has(rec);
         deleted.add(rec.id);
         clearTimeout(noteTimers.get(rec.id)); noteTimers.delete(rec.id);
-        ensureDb().then(() => tx(['records', 'photos', 'audio'], 'readwrite', (t) => { t.objectStore('photos').delete(rec.id); t.objectStore('audio').delete(rec.id); return t.objectStore('records').delete(rec.id); }))
+        dbWrite(['records', 'photos', 'audio'], (t) => { t.objectStore('photos').delete(rec.id); t.objectStore('audio').delete(rec.id); return t.objectStore('records').delete(rec.id); })
             .catch((e) => { if (!wasUnstored) throw e; })     // one that never reached storage only has to leave the list
             .then(() => {
                 unstored.delete(rec); memAudio.delete(rec.id);
@@ -1495,16 +1511,26 @@
             .catch((e) => { deleted.delete(rec.id); savedMsg('Could not delete: ' + (e && e.message ? e.message : 'storage error') + '.'); });
     }
 
+    let loadFailed = false;
     async function loadSaved() {
         try {
             await ensureDb();
-            const all = await tx('records', 'readonly', (t) => t.objectStore('records').getAll());
-            const here = new Set(saved.map((r) => r.id));       // measured before this answer came
-            saved = saved.concat((all || []).filter((r) => !here.has(r.id) && !deleted.has(r.id))).sort((a, b) => (a.time < b.time ? 1 : -1));
-            // a location search cut short by closing the app will never finish
-            saved.forEach((r) => { if (r.locationStatus === 'pending') r.locationStatus = r.location ? 'ok' : 'unavailable'; });
+            const all = await tx('records', 'readonly', (t) => t.objectStore('records').getAll()) || [];
+            const sounds = new Set();
+            try { const k = await tx('audio', 'readonly', (t) => t.objectStore('audio').getAllKeys()); (k || []).forEach((id) => sounds.add(id)); } catch (e) { /* the check below is then skipped */ }
+            const here = new Set(saved.map((r) => r.id));       // measured before this answer came: those stay as they are
+            const fromDisk = all.filter((r) => !here.has(r.id) && !deleted.has(r.id));
+            fromDisk.forEach((r) => {
+                // a location search cut short by closing the app will never finish
+                if (r.locationStatus === 'pending') r.locationStatus = r.location ? 'ok' : 'unavailable';
+                // written as "without sound" while its sound was still on the way: if the sound did arrive, they belong together again
+                if (r.audioPending && sounds.has(r.id)) { r.audio = r.audioPending; r.audioMissing = false; delete r.audioPending; putRecord(r).catch(() => {}); }
+            });
+            saved = saved.concat(fromDisk).sort((a, b) => (a.time < b.time ? 1 : -1));
+            if (loadFailed) { loadFailed = false; storageWarn = ''; savedMsg(''); tabMarks(); }
         } catch (e) {
             dropDb();
+            loadFailed = true;      // tried again every 15 s and whenever the app is returned to
             savedMsg('Saved measurements are not available here: ' + (e && e.message ? e.message : 'no storage') + '.');
             // said before anything is measured, on every tab
             storageWarn = 'Measurements CANNOT BE STORED in this browser (' + (e && e.message ? e.message : 'no storage') + '). They will be held only while the app stays open, so send each one right away. Private browsing does this: open the page in a normal tab or from the home-screen icon.';
@@ -1512,7 +1538,7 @@
         }
         renderSaved();
         if (saved.length) askPersist();
-        recoverCheckpoint();
+        if (!loadFailed) recoverCheckpoints();
     }
 
     // ---------- Tabs ----------
@@ -1686,8 +1712,9 @@
     try { $('saveNote').value = localStorage.getItem('pyramid-res-note') || ''; } catch (e) { /* no stored note */ }
     $('saveNote').addEventListener('input', noteTyped);      // on every keystroke: iOS may never send 'change'
     $('saveNote').addEventListener('change', noteTyped);
-    setInterval(retryUnstored, 15000);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) retryUnstored(); });
+    const again = () => { if (loadFailed) loadSaved().then(retryUnstored); else retryUnstored(); };
+    setInterval(again, 15000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) again(); });
     $('openSaved').addEventListener('click', () => showTab('saved', true));
     $('photoInput').addEventListener('change', photoChosen);
     $('shareAll').addEventListener('click', () => send('all', async () => prepareAll(), $('shareAll'), 'Send all: spectra, sounds, photos'));

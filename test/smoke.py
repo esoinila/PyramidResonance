@@ -491,6 +491,11 @@ async def main():
         await page.fill('#savedList .rec:first-child .recNote', 'Test room, niche 3 b'); await page.dispatch_event('#savedList .rec:first-child .recNote', 'change'); await page.wait_for_timeout(500)
         check('not sent yet' in await page.evaluate("document.querySelector('#savedList .rec:first-child .flags').textContent") and '1 not sent yet' in await page.evaluate("savedSummary.textContent"),
               'editing the note of a sent measurement marks it as not sent again', await page.evaluate("savedSummary.textContent"))
+        await page.fill('#savedList .rec:first-child .recNote', 'Test room, niche 3 c')
+        await page.click('#savedList .rec:first-child [data-role=delete]'); await page.wait_for_timeout(200)
+        check(await page.evaluate("document.querySelector('#savedList .rec:first-child [data-role=delete]').textContent") == 'Really delete?' and 'niche 3 c' in await page.evaluate("document.querySelector('#savedList .rec:first-child b').textContent"),
+              'the tap that ends typing a note is not swallowed, and the note is kept')
+        await page.wait_for_timeout(4200)
         # its sound disappears from storage: sending says so and does not mark it as sent
         await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const id = document.querySelector('#savedList .rec:first-child').dataset.id;
             const t = q.result.transaction('audio', 'readwrite'); t.objectStore('audio').delete(id); t.oncomplete = () => { q.result.close(); done(); }; }; })""")
@@ -658,11 +663,13 @@ async def main():
         if await page.evaluate("meterText.textContent") == 'Microphone off':
             await page.click('#mic'); await page.wait_for_timeout(1200)
         await page.click('#sweep'); await page.wait_for_timeout(7000)
-        check(await page.evaluate("!!localStorage.getItem('pyramid-res-sweep-checkpoint')"), 'a running sweep is noted down as it goes')
-        await page.reload()        # no code of the old page runs any more, as when iOS ends the app
+        check(await page.evaluate("Object.keys(localStorage).filter(k => k.startsWith('pyramid-res-sweep-')).length") == 1, 'a running sweep is noted down as it goes')
+        # as when iOS ends the app: no code of the old page gets to run on the way out
+        await page.evaluate("['visibilitychange', 'pagehide', 'beforeunload', 'freeze'].forEach(n => { document.addEventListener(n, e => e.stopImmediatePropagation(), true); window.addEventListener(n, e => e.stopImmediatePropagation(), true); })")
+        await page.reload()
         await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 5", timeout=8000)
         check('interrupted' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent") and 'recovered' in await page.evaluate("saveMsg.textContent")
-              and await page.evaluate("localStorage.getItem('pyramid-res-sweep-checkpoint')") is None, 'after the app was killed mid-sweep, the sweep is recovered at the next start', await page.evaluate("saveMsg.textContent"))
+              and await page.evaluate("Object.keys(localStorage).filter(k => k.startsWith('pyramid-res-sweep-')).length") == 0, 'after the app was killed mid-sweep, the sweep is recovered at the next start', await page.evaluate("saveMsg.textContent"))
         await page.reload(); await page.wait_for_timeout(1200)
         check(await page.evaluate("document.querySelectorAll('#savedList .rec').length") == 5, 'and it is recovered once, not again at every start')
         check(not errors, 'no page errors (interrupted claps)', errors)

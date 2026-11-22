@@ -306,12 +306,16 @@
         (function () {
             var reloadButton = document.getElementById('reload');
             if (reloadButton) reloadButton.addEventListener('click', function () {
-                // measurements that the phone storage has not accepted live only in this page: a reload would destroy them
-                var n = 0;
-                try { n = window.PyramidUpdate && typeof PyramidUpdate.unstored === 'function' ? PyramidUpdate.unstored() : 0; } catch (e) { n = 0; }
-                if (n && reloadButton.getAttribute('data-armed') !== '1') {
+                // A reload ends whatever the page is doing. Measurements that the phone storage has not accepted live
+                // only in this page, and a clap or sweep under way would be cut off: both need a second, deliberate tap.
+                var n = 0, busy = false, up = window.PyramidUpdate;
+                try { n = up && typeof up.unstored === 'function' ? up.unstored() : 0; } catch (e) { n = 0; }
+                try { busy = up && typeof up.busy === 'function' ? !!up.busy() : false; } catch (e) { busy = false; }
+                if ((n || busy) && reloadButton.getAttribute('data-armed') !== '1') {
                     reloadButton.setAttribute('data-armed', '1');
-                    reloadButton.textContent = n + ' measurement' + (n === 1 ? ' is' : 's are') + ' NOT STORED and would be lost. Send them first. Tap again to load anyway';
+                    reloadButton.textContent = n ? n + ' measurement' + (n === 1 ? ' is' : 's are') + ' NOT STORED and would be lost. Send them first. Tap again to load anyway'
+                        : 'Something is still being measured or saved. Wait a moment, or tap again to load anyway';
+                    setTimeout(function () { reloadButton.setAttribute('data-armed', ''); reloadButton.textContent = 'Load the new version'; }, 6000);
                     return;
                 }
                 location.reload();
