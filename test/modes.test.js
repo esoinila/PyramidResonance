@@ -373,3 +373,23 @@ test('audioInfo describes the sound file, and a record starts without one', () =
   assert.strictEqual(Rec.audioInfo(0, 48000), null);
   assert.strictEqual(Rec.makeRecord({}).audio, null);
 });
+
+test('a record carries the marks that warn about its quality and backup state', () => {
+  const R = require('../records.js');
+  const plain = R.makeRecord({ kind: 'clap', curve: [{ f: 100, db: -40 }], peaks: [] });
+  assert.deepStrictEqual([plain.interrupted, plain.disturbed, plain.audioMissing, plain.sentAt], [false, false, false, null]);
+  const cut = R.makeRecord({ kind: 'sweep', interrupted: true, disturbed: true, audioMissing: 1, curve: [], peaks: [] });
+  assert.deepStrictEqual([cut.interrupted, cut.disturbed, cut.audioMissing], [true, true, true]);
+  // an export of everything keeps them
+  const all = R.exportAll([cut, plain], 'test');
+  assert.strictEqual(all.measurements[0].interrupted, true);
+  assert.strictEqual(all.measurements[1].sentAt, null);
+});
+
+test('app.js never drops a measurement on a storage failure, and has no manual Save step', () => {
+  const fs = require('node:fs'), path = require('node:path');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8'), page = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.ok(!/id="saveBtn"|id="keepAudio"/.test(page), 'no Save button and no switch for keeping the sound');
+  assert.ok(/saved\.unshift\(rec\);\s*unstored\.add\(rec\);/.test(app), 'a measurement enters the list before storage is even tried');
+  for (const fn of ['finishSweep', 'keepPartialSweep', 'cancelClap']) assert.ok(new RegExp('function ' + fn + '\\b').test(app), fn);
+});

@@ -83,6 +83,10 @@
       curve,                    // [[Hz, dB], ...]; dB is relative, not calibrated
       photo: null,              // { name, type, width, height, takenTime } once a photo is attached
       audio: null,              // { type, format, sampleRate, channels, samples, durationS } when the raw sound was kept
+      interrupted: !!input.interrupted,   // cut short (Stop, microphone lost, app left): what was recorded up to then
+      disturbed: !!input.disturbed,       // the volume was changed during a sweep
+      audioMissing: !!input.audioMissing, // a clap whose sound could not be recorded or stored
+      sentAt: null,                       // ISO time of the last successful Send, else null: no copy outside the phone yet
       app: String(input.app || ''),
     };
   }
