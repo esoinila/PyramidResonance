@@ -168,7 +168,7 @@
             <div id="meter"><div id="meterBar"></div></div>
             <div id="meterText">Microphone off</div>
             <p class="hint">Easiest check: turn the microphone on, stop any tone, and record one sharp clap. The room rings at its own notes and no speaker is needed.</p>
-            <p class="hint">Nothing is sent anywhere unless you send it. Every clap is saved on this phone with its sound, also one that is cut short. On an iPhone, turning the microphone on can move the sound from a Bluetooth speaker to the phone itself. If the tone gets quiet, turn the microphone off and judge by ear, or use the clap.</p>
+            <p class="hint">Nothing is sent anywhere unless you send it. Every clap is saved on this phone with its sound, also one that is cut short. The one thing the app cannot save is a clap during whose 4 seconds the phone shuts the app down completely; a sweep in that case is recovered up to its last two seconds at the next start. On an iPhone, turning the microphone on can move the sound from a Bluetooth speaker to the phone itself. If the tone gets quiet, turn the microphone off and judge by ear, or use the clap.</p>
             <p class="warn" id="micWarn"></p>
         </div>
 
@@ -305,12 +305,22 @@
         // an app.js that does not start, this still fetches the next version and loads it.
         (function () {
             var reloadButton = document.getElementById('reload');
-            if (reloadButton) reloadButton.addEventListener('click', function () { location.reload(); });
+            if (reloadButton) reloadButton.addEventListener('click', function () {
+                // measurements that the phone storage has not accepted live only in this page: a reload would destroy them
+                var n = 0;
+                try { n = window.PyramidUpdate && typeof PyramidUpdate.unstored === 'function' ? PyramidUpdate.unstored() : 0; } catch (e) { n = 0; }
+                if (n && reloadButton.getAttribute('data-armed') !== '1') {
+                    reloadButton.setAttribute('data-armed', '1');
+                    reloadButton.textContent = n + ' measurement' + (n === 1 ? ' is' : 's are') + ' NOT STORED and would be lost. Send them first. Tap again to load anyway';
+                    return;
+                }
+                location.reload();
+            });
             if (!('serviceWorker' in navigator)) return;
             var sw = navigator.serviceWorker, hadController = !!sw.controller;
             // reg: the registration. ready: a newer version has taken over and waits for a reload.
             // busy: set by app.js; true while a tone plays or the microphone is on.
-            var state = window.PyramidUpdate = { reg: null, ready: false, busy: null };
+            var state = window.PyramidUpdate = { reg: null, ready: false, busy: null, unstored: null };
             sw.addEventListener('controllerchange', function () {
                 if (!hadController) { hadController = true; return; }   // first install: this page is already the new version
                 state.ready = true;
@@ -330,7 +340,7 @@
                 sw.register('./sw.js', { updateViaCache: 'none' }).then(function (reg) {
                     state.reg = reg;
                     // a home-screen app is often resumed, not relaunched: look for an update then too
-                    document.addEventListener('visibilitychange', function () { if (!document.hidden) reg.update().catch(function () {}); });
+                    document.addEventListener('visibilitychange', function () { if (!document.hidden && reg && reg.update) reg.update().catch(function () {}); });
                 }).catch(function (err) { console.log('Service worker registration failed', err); });
             });
         })();
