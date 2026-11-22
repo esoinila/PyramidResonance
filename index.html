@@ -89,6 +89,13 @@
         #tabs { flex: 1; min-width: 0; }
         #stripStop { flex: none; width: 48px; min-height: 44px; padding: 0; font-size: 1.1rem; }
         #notice { margin: 8px 0 0; min-height: 0; }
+        #recentList button { display: block; width: 100%; text-align: left; background: transparent; color: var(--text); border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 10px 2px; min-height: 44px; font-size: .9rem; font-weight: 400; font-variant-numeric: tabular-nums; }
+        #recentList button b { color: var(--gold); }
+        .recNote { margin-top: 6px; }
+        .flags { margin: 4px 0; }
+        .flag-bad { color: var(--bad); font-weight: 700; }
+        .flag-todo { color: var(--gold); }
+        .flag-ok { color: var(--muted); }
         #nowLevel { color: var(--gold); font-size: .9rem; min-height: 1.3em; font-variant-numeric: tabular-nums; }
 
         #now { text-align: center; padding: 8px 0 2px; }
@@ -140,7 +147,7 @@
                 <div id="tabs" role="tablist" aria-label="Sections">
                     <button role="tab" id="tabBtn-measure" data-tab="measure" aria-controls="tab-measure">Measure<span id="dotMeasure" hidden><span class="dot" aria-hidden="true"> ●</span><span class="sr"> (microphone or sweep on)</span></span></button>
                     <button role="tab" id="tabBtn-play" data-tab="play" aria-controls="tab-play">Play<span id="dotPlay" hidden><span class="dot" aria-hidden="true"> ♪</span><span class="sr"> (a tone is playing)</span></span></button>
-                    <button role="tab" id="tabBtn-saved" data-tab="saved" aria-controls="tab-saved">Saved</button>
+                    <button role="tab" id="tabBtn-saved" data-tab="saved" aria-controls="tab-saved">Saved<span id="savedCount"></span></button>
                     <button role="tab" id="tabBtn-setup" data-tab="setup" aria-controls="tab-setup">Setup</button>
                 </div>
                 <!-- Always in reach, on every tab. It is always there (greyed when silent), so nothing moves when a tone starts. -->
@@ -161,7 +168,7 @@
             <div id="meter"><div id="meterBar"></div></div>
             <div id="meterText">Microphone off</div>
             <p class="hint">Easiest check: turn the microphone on, stop any tone, and record one sharp clap. The room rings at its own notes and no speaker is needed.</p>
-            <p class="hint">Nothing is sent anywhere. The sound of a clap is kept only if you save that measurement with "Keep the sound" ticked; everything else is analysed and discarded. On an iPhone, turning the microphone on can move the sound from a Bluetooth speaker to the phone itself. If the tone gets quiet, turn the microphone off and judge by ear, or use the clap.</p>
+            <p class="hint">Nothing is sent anywhere unless you send it. Every clap is saved on this phone with its sound, also one that is cut short. The one thing the app cannot save is a clap during whose 4 seconds the phone shuts the app down completely; a sweep in that case is recovered up to its last two seconds at the next start. On an iPhone, turning the microphone on can move the sound from a Bluetooth speaker to the phone itself. If the tone gets quiet, turn the microphone off and judge by ear, or use the clap.</p>
             <p class="warn" id="micWarn"></p>
         </div>
 
@@ -170,13 +177,16 @@
             <canvas id="chart" role="img" aria-label="Measured level against frequency with predicted room modes"></canvas>
             <p class="hint" id="chartHint">Run a sweep or record a clap with the microphone on. Gold line: measured level. Ticks along the top: the predicted modes of the room chosen in Setup (long ticks are axial).</p>
             <div id="peaks"></div>
-            <div id="saveBox" hidden>
-                <label class="mt">Place or note (optional)
+            <div id="saveBox">
+                <p class="hint" id="saveMsg" role="status">Every measurement is saved on this phone by itself the moment it finishes, a clap with its sound. Nothing needs to be tapped. They collect on the Saved tab at the top of the page, where you can send them.</p>
+                <div id="recentBox" hidden>
+                    <p class="hint" id="recentTitle" style="margin-bottom:4px"></p>
+                    <div id="recentList"></div>
+                </div>
+                <div class="row mt"><button id="openSaved" class="ghost" type="button">Open saved measurements</button></div>
+                <label class="mt">Place or note for the next measurements (optional; stays until you change it)
                     <input type="text" id="saveNote" maxlength="120" autocomplete="off" placeholder="e.g. stairwell, 2nd floor">
                 </label>
-                <label class="mt check" id="keepAudioRow" hidden><input type="checkbox" id="keepAudio" checked><span>Keep the sound of the clap for later analysis (<span id="keepAudioSize"></span>)</span></label>
-                <div class="row mt"><button id="saveBtn">Save this measurement</button></div>
-                <p class="hint" id="saveMsg"></p>
             </div>
         </div>
 
@@ -245,10 +255,12 @@
         <section class="tab" id="tab-saved" role="tabpanel" aria-labelledby="tabBtn-saved" hidden>
         <div class="card">
             <h2>Saved measurements</h2>
+            <p class="hint" id="savedSummary" style="margin-top:0"></p>
             <div id="savedList"></div>
-            <p class="hint" id="savedEmpty">Nothing saved yet. After a clap or a measured sweep, "Save this measurement" stores the spectrum here with the time and your location. You can add a photo and send it by mail or to another app.</p>
-            <div class="row mt"><button id="shareAll" class="ghost" hidden>Send all as one file</button></div>
-            <p class="hint">Saved on this phone only, until you send them. The location needs "Precise Location" allowed for this page. Photos are kept inside the app (reduced in size) and travel with the measurement when you send it; a web page cannot write to the phone's photo gallery itself.</p>
+            <p class="hint" id="savedEmpty">Nothing saved yet. Every clap and every measured sweep is stored here by itself the moment it finishes, with the time, your location and, for a clap, its sound. You can add a photo and send it by mail or to another app.</p>
+            <div class="row mt"><button id="shareAll" class="ghost" hidden>Send all: spectra, sounds, photos</button></div>
+            <p class="hint"><b>Where the data is:</b> inside this app's own storage on this phone, and nowhere else. It stays when the app is closed, updated or the phone restarts. It is erased if you delete the app's icon from the home screen or clear Safari's website data. Sending is the only backup: each measurement shows "not sent yet" until it has been sent. <span id="persistLine"></span></p>
+            <p class="hint">The location needs "Precise Location" allowed for this page. Photos are kept inside the app (reduced to 1600 px) and travel with the measurement when you send it; a web page cannot write to the phone's photo gallery itself.</p>
             <p class="warn" id="savedMsg"></p>
             <input type="file" id="photoInput" accept="image/*" hidden>
         </div>
@@ -293,12 +305,26 @@
         // an app.js that does not start, this still fetches the next version and loads it.
         (function () {
             var reloadButton = document.getElementById('reload');
-            if (reloadButton) reloadButton.addEventListener('click', function () { location.reload(); });
+            if (reloadButton) reloadButton.addEventListener('click', function () {
+                // A reload ends whatever the page is doing. Measurements that the phone storage has not accepted live
+                // only in this page, and a clap or sweep under way would be cut off: both need a second, deliberate tap.
+                var n = 0, busy = false, up = window.PyramidUpdate;
+                try { n = up && typeof up.unstored === 'function' ? up.unstored() : 0; } catch (e) { n = 0; }
+                try { busy = up && typeof up.busy === 'function' ? !!up.busy() : false; } catch (e) { busy = false; }
+                if ((n || busy) && reloadButton.getAttribute('data-armed') !== '1') {
+                    reloadButton.setAttribute('data-armed', '1');
+                    reloadButton.textContent = n ? n + ' measurement' + (n === 1 ? ' is' : 's are') + ' NOT STORED and would be lost. Send them first. Tap again to load anyway'
+                        : 'Something is still being measured or saved. Wait a moment, or tap again to load anyway';
+                    setTimeout(function () { reloadButton.setAttribute('data-armed', ''); reloadButton.textContent = 'Load the new version'; }, 6000);
+                    return;
+                }
+                location.reload();
+            });
             if (!('serviceWorker' in navigator)) return;
             var sw = navigator.serviceWorker, hadController = !!sw.controller;
             // reg: the registration. ready: a newer version has taken over and waits for a reload.
             // busy: set by app.js; true while a tone plays or the microphone is on.
-            var state = window.PyramidUpdate = { reg: null, ready: false, busy: null };
+            var state = window.PyramidUpdate = { reg: null, ready: false, busy: null, unstored: null };
             sw.addEventListener('controllerchange', function () {
                 if (!hadController) { hadController = true; return; }   // first install: this page is already the new version
                 state.ready = true;
@@ -318,7 +344,7 @@
                 sw.register('./sw.js', { updateViaCache: 'none' }).then(function (reg) {
                     state.reg = reg;
                     // a home-screen app is often resumed, not relaunched: look for an update then too
-                    document.addEventListener('visibilitychange', function () { if (!document.hidden) reg.update().catch(function () {}); });
+                    document.addEventListener('visibilitychange', function () { if (!document.hidden && reg && reg.update) reg.update().catch(function () {}); });
                 }).catch(function (err) { console.log('Service worker registration failed', err); });
             });
         })();

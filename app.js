@@ -8,8 +8,8 @@
 
     // Must equal VERSION in sw.js (a test checks it). Change both for every release:
     // the new sw.js is what makes phones fetch the new files, all at once.
-    const BUILD = '2.3.0';
-    const RELEASED = '2026-11-21T19:04:00Z';   // when this version was published; the same value is in sw.js
+    const BUILD = '2.4.0';
+    const RELEASED = '2026-11-22T18:25:00Z';   // when this version was published; the same value is in sw.js
     const MATCH_TOL = 1.5;    // percent: how close a measured peak must be to a listed mode
 
     // Registering the service worker and reloading into a new version is done by the small
@@ -302,6 +302,7 @@
             await ensureCtx();
             if (clapBusy) return;
             if (voice && voice.kind === 'sweep') abortSweep();
+            keepPartialSweep();      // a sweep being measured is saved before a tone replaces it
             startVoice('tone', m.f, m.f, 0);
         } catch (e) {
             onStopped(null);
@@ -320,6 +321,7 @@
         const v = voice;
         stopVoice();
         if (v && v.kind === 'sweep') abortSweep();
+        keepPartialSweep();
         recording = false;
         cancelClap();
         onStopped(null);
@@ -369,8 +371,9 @@
             await ensureCtx();
             if (clapBusy) return;
             abortSweep();
+            keepPartialSweep();      // never start over the top of an unsaved one
             recording = micOn;
-            if (recording) { rawAudio = null; curve = []; curveState = 'none'; viewing = null; curveKind = 'sweep'; disturbed = false; $('peaks').textContent = ''; }
+            if (recording) { rawAudio = null; curve = []; curveState = 'none'; viewing = null; curveKind = 'sweep'; disturbed = false; sweepId = null; checkpointAt = 0; $('peaks').textContent = ''; }
             lastReadF = 0;
             setActive(-1);
             startVoice('sweep', settings.fMin, settings.fMax, settings.sweepDur);
@@ -403,7 +406,7 @@
                     const binHz = ctx.sampleRate / fast.fftSize;
                     const smear = M.sweepRate(voice.f1, voice.f2, voice.dur, fr) * windowS / 2;
                     const db = M.bandLevelDb(fastSpectrum, binHz, fr, 3 + Math.ceil(smear / binHz));
-                    if (db != null) { curve.push({ f: fr, db }); lastReadF = fr; }
+                    if (db != null) { curve.push({ f: fr, db }); lastReadF = fr; checkpointSweep(); }
                 }
             }
         }
@@ -419,10 +422,11 @@
         abortSweep();
         const wasRecording = recording;
         recording = false;
-        if (wasRecording && curveKind === 'sweep' && curve.length > 10) {
+        if (wasRecording && curveKind === 'sweep' && curve.length >= 1) {
             curveState = 'done';
-            showPeaks(M.findPeaks(curve, 4));
-        } else if (wasRecording) showPeaks([]);
+            showPeaks(curve.length > 10 ? M.findPeaks(curve, 4) : []);
+            autoSave(false);
+        } else if (wasRecording) { showPeaks([]); saveNote('That sweep measured nothing, so there was nothing to save.'); }
     }
 
     // ---------- Microphone ----------
@@ -438,8 +442,7 @@
     let clapRun = 0;          // identifies one recording, so a cancelled one cannot carry on
 
     // Raw sound of a clap. A small tap node hands the microphone samples to the page, only
-    // while a clap is being recorded. The sound is kept in memory and is stored only if
-    // the measurement is saved with "Keep the sound" ticked.
+    // while a clap is being recorded. The sound is always stored with the measurement.
     let tap = null;           // { node, sink, start(), stop() }
     let rawChunks = null;     // blocks of samples while a clap is being recorded, else null
     let rawCount = 0;
@@ -530,7 +533,8 @@
             fastSpectrum = new Float32Array(fast.frequencyBinCount);
             micSource.connect(fine);   // analysis only: never routed to the speaker
             micSource.connect(fast);
-            startTap(micSource).catch(() => {});   // without it a clap is still measured, only its sound is not kept
+            // without the tap a clap is still measured, but its sound cannot be kept: say so now, not afterwards
+            startTap(micSource).catch(() => {}).then(() => { if (micStream === stream && !tap) $('micWarn').textContent = 'This phone is not giving the app the raw sound right now: claps will be saved WITHOUT their sound. Turn the microphone off and on to try again.'; });
             stream.getTracks().forEach((t) => { t.onended = () => { if (micStream === stream) micOff('The microphone was taken away by the system.'); }; });
             micOn = true;
             $('mic').textContent = 'Turn microphone off';
@@ -549,6 +553,7 @@
         clearInterval(meterTimer); meterTimer = null;
         cancelClap();
         stopTap();
+        keepPartialSweep();
         recording = false;
         if (micSource) { try { micSource.disconnect(); } catch (e) { /* ignore */ } }
         if (micStream) micStream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
@@ -596,12 +601,18 @@
         $('meterText').textContent = db.toFixed(1) + ' dB ' + label;
     }
 
+    let clapFinish = null;    // set while a clap is being recorded: ends it and saves what there is
     function cancelClap(message) {
         if (!clapBusy) return;
         clapRun++;
-        clearInterval(clapTimer); clapTimer = null;
-        clapBusy = false;
-        rawChunks = null; rawCount = 0;
+        const salvage = clapFinish;
+        clapFinish = null;
+        if (salvage) salvage(true);          // recording had begun: keep the sound and spectrum so far
+        else {
+            clearInterval(clapTimer); clapTimer = null;
+            clapBusy = false;
+            rawChunks = null; rawCount = 0;
+        }
         if (tap) tap.stop();
         if (message) $('micWarn').textContent = message;
         setClapButton();
@@ -662,6 +673,7 @@
                     startMs = now;
                     rawAudio = null; rawChunks = []; rawCount = 0;
                     if (tap) tap.start();
+                    if (armClap) armClap();      // from here on an interruption saves instead of dropping
                 } else return;
             }
             if (now < startMs + 4000) {
@@ -670,22 +682,37 @@
                 for (let k = k0; k <= k1; k++) if (fineSpectrum[k] > hold[k - k0]) hold[k - k0] = fineSpectrum[k];
                 return;
             }
+            finish(false);
+        }, 60);
+        // Ends the recording and saves it. Also called when it is cut short: what was recorded is kept.
+        const finish = (interrupted) => {
+            clapFinish = null;
             clearInterval(clapTimer); clapTimer = null;
             clapBusy = false;
             rawAudio = takeRaw();
             curve = []; viewing = null;
             for (let k = k0; k <= k1; k++) if (Number.isFinite(hold[k - k0])) curve.push({ f: k * binHz, db: hold[k - k0] });
             curveKind = 'clap';
-            curveState = 'done';
             disturbed = false;
             setClapButton();
             setButtons();
+            if (interrupted && !curve.length && !rawAudio) {
+                curveState = 'none';
+                showPeaks([]);
+                saveNote('The clap was interrupted before any sound was recorded, so there was nothing to save.');
+                drawChart();
+                return;
+            }
+            curveState = 'done';
             const peaks = M.findPeaks(curve, 4);
             if (oldF != null) peaks.forEach((p) => { if (Math.abs(p.f - oldF) / oldF * 100 <= MATCH_TOL) p.echo = true; });
             showPeaks(peaks);
+            autoSave(interrupted);
             drawChart();
-        }, 60);
+        };
+        armClap = () => { clapFinish = finish; };
     }
+    let armClap = null;
 
     // ---------- Results ----------
     function showPeaks(peaks) {
@@ -827,13 +854,6 @@
             const cf = cursorF != null ? cursorF : (voice && voice.kind === 'tone' ? voice.f1 : null);
             paintChart(g, Wd, Hd, { f1: settings.fMin, f2: settings.fMax, curve, marks: shown, cursor: cf });
         }
-        // the save box follows the chart: only a finished, live measurement can be saved
-        const can = !viewing && (curveState === 'done' || curveState === 'saved') && !recording && !clapBusy;
-        $('saveBox').hidden = !can;
-        $('saveBtn').disabled = curveState === 'saved';
-        $('saveBtn').textContent = curveState === 'saved' ? 'Saved' : 'Save this measurement';
-        $('keepAudioRow').hidden = !(curveKind === 'clap' && rawAudio);
-        if (!$('keepAudioRow').hidden) $('keepAudioSize').textContent = (rawAudio.samples.length / rawAudio.sampleRate).toFixed(1) + ' s, ' + (rawAudio.samples.length * 4 / 1e6).toFixed(1) + ' MB';
     }
 
     // ---------- Saved measurements ----------
@@ -843,35 +863,143 @@
     const thumbs = new Map();       // record id -> object URL of its photo
     const prepared = new Map();     // record id or 'all' -> { files, title, text } ready for the share sheet
     let photoTarget = null;
+    let photoBusy = false;
+    // Nothing measured is ever dropped because storage failed: such records stay in the list,
+    // held in memory and marked, and the app keeps trying to write them.
+    const unstored = new Set();     // records not (fully) written to the phone yet
+    const memAudio = new Map();     // record id -> WAV bytes of an unstored record
+    let storeError = '';            // why the last write failed
+    let pendingWrites = 0;          // write transactions in flight
+    let locating = 0;               // location searches in flight
+    let storageWarn = '';           // start-up storage problem, shown in the top bar
 
+    // A storage call that never answers must not hold everything else up: after this long it counts as failed.
+    const STORAGE_WAIT_MS = 10000;
     function openDb() {
         return new Promise((resolve, reject) => {
             if (!window.indexedDB) { reject(new Error('This browser has no storage for saved measurements.')); return; }
-            const rq = indexedDB.open('pyramid-res', 2);
+            let settled = false;
+            const timer = setTimeout(() => { if (!settled) { settled = true; reject(new Error('the phone storage did not answer')); } }, STORAGE_WAIT_MS);
+            const end = (fn, value) => { if (settled) { if (fn === resolve && value) { try { value.close(); } catch (e) { /* ignore */ } } return; } settled = true; clearTimeout(timer); fn(value); };
+            let rq;
+            try { rq = indexedDB.open('pyramid-res', 2); } catch (e) { end(reject, e); return; }
             rq.onupgradeneeded = () => {
                 const d = rq.result;
                 if (!d.objectStoreNames.contains('records')) d.createObjectStore('records', { keyPath: 'id' });
                 if (!d.objectStoreNames.contains('photos')) d.createObjectStore('photos');
                 if (!d.objectStoreNames.contains('audio')) d.createObjectStore('audio');
             };
-            rq.onsuccess = () => resolve(rq.result);
-            rq.onerror = () => reject(rq.error || new Error('Storage could not be opened.'));
-            rq.onblocked = () => reject(new Error('Storage is busy in another tab.'));
+            rq.onsuccess = () => end(resolve, rq.result);
+            rq.onerror = () => end(reject, rq.error || new Error('Storage could not be opened.'));
+            rq.onblocked = () => end(reject, new Error('Storage is busy in another tab.'));
         });
+    }
+    let opening = null;
+    function ensureDb() {
+        if (db) return Promise.resolve(db);
+        if (!opening) {
+            opening = openDb().then((d) => {
+                // the phone can close the connection behind the app's back: forget it, so the next write opens a new one
+                d.onversionchange = () => { try { d.close(); } catch (e) { /* ignore */ } if (db === d) db = null; };
+                d.onclose = () => { if (db === d) db = null; };
+                db = d;
+                opening = null;
+                return d;
+            }, (e) => { opening = null; throw e; });
+        }
+        return opening;
+    }
+    function dropDb() {
+        const d = db;
+        db = null;
+        if (d) { try { d.close(); } catch (e) { /* already gone */ } }
     }
     // One transaction; resolves with the request's result once the data is safely written
     function tx(stores, mode, work) {
-        return new Promise((resolve, reject) => {
+        const writing = mode === 'readwrite';
+        if (writing) pendingWrites++;
+        const p = new Promise((resolve, reject) => {
             if (!db) { reject(new Error('Storage is not available.')); return; }
-            let out;
-            const t = db.transaction(stores, mode);
-            const rq = work(t);
-            if (rq) rq.onsuccess = () => { out = rq.result; };
-            t.oncomplete = () => resolve(out);
-            t.onerror = t.onabort = () => reject(t.error || new Error('Storage error.'));
+            let out, settled = false;
+            const end = (fn, value) => { if (settled) return; settled = true; clearTimeout(timer); fn(value); };
+            const timer = setTimeout(() => end(reject, new Error('the phone storage did not answer')), STORAGE_WAIT_MS);
+            try {
+                let t;
+                // "strict": the write is on the disk, not only handed to the system, before it counts as done
+                try { t = db.transaction(stores, mode, writing ? { durability: 'strict' } : undefined); } catch (e) { t = db.transaction(stores, mode); }
+                const rq = work(t);
+                if (rq) rq.onsuccess = () => { out = rq.result; };
+                t.oncomplete = () => end(resolve, out);
+                t.onerror = t.onabort = () => end(reject, t.error || new Error('Storage error.'));
+            } catch (e) { end(reject, e); }
         });
+        if (writing) p.then(() => { pendingWrites--; }, () => { pendingWrites--; });
+        return p;
     }
-    const putRecord = (rec) => { prepared.delete(rec.id); prepared.delete('all'); return tx('records', 'readwrite', (t) => t.objectStore('records').put(rec)); };
+    // Every write goes through here: the phone may have closed the connection while the app was in the
+    // background, so a failed first try is repeated once on a new connection before it counts as a failure.
+    async function dbWrite(stores, work) {
+        try { await ensureDb(); return await tx(stores, 'readwrite', work); } catch (e) { dropDb(); }
+        await ensureDb();
+        try { return await tx(stores, 'readwrite', work); } catch (e) { dropDb(); throw e; }
+    }
+    const deleted = new Set();      // ids the user deleted: a write still in flight must not bring them back
+    const inFlight = new Set();     // records being written right now
+    // What goes to the phone for a record whose sound is still only in memory: honest about the missing sound
+    // (audioPending keeps the sound's description, so that if the sound did reach storage after all it is found again at the next start)
+    const dbCopy = (rec) => (unstored.has(rec) && memAudio.has(rec.id) ? Object.assign({}, rec, { audio: null, audioMissing: true, audioPending: rec.audio }) : rec);
+    // Any change to a record after it was sent means the copy outside the phone is out of date
+    function touched(rec) { rec.sentAt = null; prepared.delete(rec.id); prepared.delete('all'); }
+    // A record still held in memory is written whole by storeRecord, so a small update only needs to wait for that.
+    const putRecord = (rec) => {
+        prepared.delete(rec.id); prepared.delete('all');
+        if (deleted.has(rec.id)) return Promise.resolve();
+        // being written right now, or waiting to be: storeRecord writes the whole record, and once more when it is done
+        if (inFlight.has(rec) || (unstored.has(rec) && !memAudio.has(rec.id))) return Promise.resolve();
+        return dbWrite('records', (t) => t.objectStore('records').put(dbCopy(rec)));
+    };
+    // Writes a record and its sound. On failure the record stays in memory and in the list; if only
+    // the sound did not fit, the spectrum is written alone (marked as without sound) and the sound stays in memory.
+    async function storeRecord(rec) {
+        if (inFlight.has(rec) || deleted.has(rec.id) || !unstored.has(rec)) return !unstored.has(rec);
+        inFlight.add(rec);
+        const wav = memAudio.get(rec.id) || null;
+        let ok = false;
+        try {
+            if (wav) await dbWrite(['records', 'audio'], (t) => { t.objectStore('audio').put({ type: 'audio/wav', buffer: wav }, rec.id); return t.objectStore('records').put(rec); });
+            else await dbWrite('records', (t) => t.objectStore('records').put(rec));
+            unstored.delete(rec);
+            memAudio.delete(rec.id);
+            ok = true;
+            checkpointStored(rec.id);
+            // a location or note that arrived while that write was under way is in memory only: write once more
+            if (!deleted.has(rec.id)) await dbWrite('records', (t) => t.objectStore('records').put(rec)).catch(() => {});
+        } catch (e) {
+            storeError = e && e.message ? e.message : 'storage error';
+            if (wav && unstored.has(rec) && !deleted.has(rec.id)) {
+                try { await dbWrite('records', (t) => t.objectStore('records').put(dbCopy(rec))); } catch (e2) { /* still in memory */ }
+            }
+        }
+        inFlight.delete(rec);
+        // deleted while it was being written: take it out again
+        if (deleted.has(rec.id)) dbWrite(['records', 'photos', 'audio'], (t) => { t.objectStore('photos').delete(rec.id); t.objectStore('audio').delete(rec.id); return t.objectStore('records').delete(rec.id); }).catch(() => {});
+        return ok;
+    }
+    let retrying = false;
+    async function retryUnstored() {
+        if (retrying || !unstored.size) return;
+        retrying = true;
+        let changed = false;
+        try {
+            for (const rec of Array.from(unstored)) if (await storeRecord(rec)) changed = true;
+        } finally { retrying = false; }
+        if (changed) { renderSaved(); tabMarks(); }
+    }
+    function storageNotice() {
+        if (unstored.size) return unstored.size + (unstored.size === 1 ? ' measurement is' : ' measurements are') + ' NOT STORED on the phone (' + (storeError || 'storage error') +
+            '). They are held only while the app stays open: send them now from the Saved tab. The app keeps trying to store them.';
+        return storageWarn;
+    }
     const savedMsg = (text) => { $('savedMsg').textContent = text || ''; };
 
     function locationLine(rec) {
@@ -879,22 +1007,93 @@
         return { pending: 'Getting location…', denied: 'No location: not allowed for this page.', unavailable: 'No location: the phone could not find one.', off: 'No location.' }[rec.locationStatus] || 'No location.';
     }
 
+    const whenShort = (iso) => { const t = new Date(iso), p = (n) => String(n).padStart(2, '0'); return t.getDate() + '.' + (t.getMonth() + 1) + '. ' + p(t.getHours()) + ':' + p(t.getMinutes()); };
+    // Everything a person should know about a record at a glance: [text, kind], kind 'bad' is shown in red
+    function flags(rec) {
+        const out = [];
+        if (unstored.has(rec)) out.push(['NOT STORED ON THE PHONE: send it now', 'bad']);
+        if (rec.interrupted) out.push(['interrupted', 'bad']);
+        if (rec.kind === 'clap' && !rec.audio) out.push(['NO SOUND', 'bad']);
+        if (rec.disturbed) out.push(['volume changed during the sweep', 'bad']);
+        out.push(rec.sentAt ? ['sent ' + whenShort(rec.sentAt), 'ok'] : ['not sent yet', 'todo']);
+        return out;
+    }
+    function flagLine(rec) {
+        const p = document.createElement('p');
+        p.className = 'hint flags';
+        flags(rec).forEach(([text, kind], i) => {
+            if (i) p.appendChild(document.createTextNode(' · '));
+            const sp = document.createElement('span');
+            sp.textContent = text; sp.className = 'flag-' + kind;
+            p.appendChild(sp);
+        });
+        return p;
+    }
+    const noteTimers = new Map();   // record id -> timer of a note waiting to be written
+    function summaries() {
+        const unsent = saved.filter((r) => !r.sentAt).length;
+        $('savedCount').textContent = saved.length ? ' ' + saved.length : '';
+        $('savedSummary').textContent = saved.length ? saved.length + (saved.length === 1 ? ' measurement' : ' measurements') + ' on this phone, ' + (unsent ? unsent + ' not sent yet.' : 'all sent.') : '';
+        $('recentTitle').textContent = saved.length + ' saved on this phone' + (unsent ? ', ' + unsent + ' not sent yet' : ', all sent') + '. Newest first' + (saved.length > 5 ? ' (the last 5; all are on the Saved tab)' : '') + ':';
+    }
     function renderSaved() {
         const host = $('savedList');
+        // the list is rebuilt while a note may be being typed (a location arrives): keep the cursor where it was
+        const active = document.activeElement, typing = active && active.classList && active.classList.contains('recNote') ? { id: active.dataset.id, at: active.selectionStart } : null;
         host.textContent = '';
         $('savedEmpty').hidden = saved.length > 0;
+        summaries();
+        // the newest few are also listed right under the chart, so each new measurement is seen to arrive
+        $('recentBox').hidden = saved.length === 0;
+        $('recentList').textContent = '';
+        saved.slice(0, 5).forEach((rec) => {
+            const b = document.createElement('button'), t = document.createElement('b');
+            b.type = 'button';
+            t.textContent = R.localParts(rec).time + ':' + R.localParts(rec).compact.slice(4);
+            b.appendChild(t);
+            b.appendChild(document.createTextNode(' ' + rec.kind + (rec.audio ? ' + sound' : '') + ' · ' + R.peakSummary(rec, 3) + (rec.note ? ' · ' + rec.note : '')));
+            const bad = flags(rec).filter((f) => f[1] === 'bad').map((f) => f[0]);
+            if (bad.length) { const w = document.createElement('span'); w.className = 'flag-bad'; w.textContent = ' · ' + bad.join(' · '); b.appendChild(w); }
+            b.addEventListener('click', () => showRecord(rec));
+            $('recentList').appendChild(b);
+        });
         $('shareAll').hidden = saved.length < 2;
         const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
         saved.forEach((rec) => {
             const box = el('div', null, 'rec');
             box.dataset.id = rec.id;
-            box.appendChild(el('b', recTitle(rec)));
+            const title = el('b', recTitle(rec));
+            box.appendChild(title);
             box.appendChild(el('p', (rec.kind === 'sweep' ? 'Sweep' : 'Clap') + ' ' + rec.fMin + '–' + rec.fMax + ' Hz · ' + R.peakSummary(rec, 4) +
                 (rec.audio ? ' · sound ' + rec.audio.durationS.toFixed(1) + ' s' : ''), 'hint'));
+            box.appendChild(flagLine(rec));
             const loc = el('p', locationLine(rec) + ' ', 'hint');
             loc.dataset.role = 'location';
             if (rec.location) { const a = el('a', 'map'); a.href = R.mapsUrl(rec.location); a.target = '_blank'; a.rel = 'noopener'; loc.appendChild(a); }
             box.appendChild(loc);
+            // each measurement has its own note, written as it is typed
+            const note = document.createElement('input');
+            note.type = 'text'; note.className = 'recNote'; note.maxLength = 200; note.autocomplete = 'off';
+            note.placeholder = 'Note for this measurement'; note.value = rec.note || ''; note.dataset.id = rec.id;
+            note.setAttribute('aria-label', 'Note for the measurement of ' + recTitle(rec));
+            const writeNote = () => { noteTimers.delete(rec.id); putRecord(rec).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.')); };
+            // only this record's own lines are refreshed: rebuilding the list here would swallow the tap that ended the typing
+            const marks = () => { const old = box.querySelector('.flags'); if (old) old.replaceWith(flagLine(rec)); title.textContent = recTitle(rec); summaries(); };
+            note.addEventListener('input', () => {
+                rec.note = note.value.slice(0, 200);
+                touched(rec);
+                marks();
+                clearTimeout(noteTimers.get(rec.id));
+                noteTimers.set(rec.id, setTimeout(writeNote, 400));
+            });
+            note.addEventListener('change', () => {
+                const text = note.value.trim().slice(0, 200);
+                if (text !== rec.note) { rec.note = text; touched(rec); }
+                marks();
+                clearTimeout(noteTimers.get(rec.id));
+                writeNote();
+            });
+            box.appendChild(note);
             if (rec.photo) {
                 const img = document.createElement('img');
                 img.alt = 'Photo for this measurement';
@@ -911,6 +1110,10 @@
             box.appendChild(row);
             host.appendChild(box);
         });
+        if (typing) {
+            const again = Array.from(host.querySelectorAll('.recNote')).find((n) => n.dataset.id === typing.id);
+            if (again) { again.focus(); try { again.setSelectionRange(typing.at, typing.at); } catch (e) { /* ignore */ } }
+        }
     }
 
     async function loadThumb(id, img) {
@@ -923,13 +1126,15 @@
         } catch (e) { /* the list still works without the picture */ }
     }
 
-    // Started straight from the Save tap. Keeps the best fix of the first 15 s, or stops early at 10 m.
+    // Started when a measurement is saved. Keeps the best fix of the first 15 s, or stops early at 10 m.
     function startLocate(rec) {
         if (!navigator.geolocation) { rec.locationStatus = 'unavailable'; return; }
         let done = false, watch = null, timer = null;
+        locating++;
         const finish = (status) => {
             if (done) return;
             done = true;
+            locating--;
             if (watch != null) navigator.geolocation.clearWatch(watch);
             clearTimeout(timer);
             rec.locationStatus = rec.location ? 'ok' : status;
@@ -939,10 +1144,12 @@
             watch = navigator.geolocation.watchPosition((pos) => {
                 if (done) return;
                 const c = pos.coords;
+                const before = rec.location;
                 rec.location = R.betterFix(rec.location, {
                     lat: c.latitude, lon: c.longitude, accuracyM: c.accuracy,
                     altitudeM: c.altitude, altitudeAccuracyM: c.altitudeAccuracy, time: new Date(pos.timestamp).toISOString(),
                 });
+                if (rec.sentAt && JSON.stringify(rec.location) !== JSON.stringify(before)) touched(rec);
                 if (rec.location && rec.location.accuracyM != null && rec.location.accuracyM <= 10) finish('ok');
                 else if (saved.includes(rec)) putRecord(rec).catch(() => {}).then(renderSaved);
             }, (err) => {
@@ -953,40 +1160,133 @@
         timer = setTimeout(() => finish('unavailable'), 15000);
     }
 
-    async function saveMeasurement() {
-        if (curveState !== 'done' || viewing) return;
-        if (!db) { $('saveMsg').textContent = 'Saving is not available in this browser (private browsing blocks it).'; return; }
+    // Every measurement is stored at once, with no tap: nothing measured may be lost because a
+    // button was not pressed. It goes into the list first and to the phone's storage right after;
+    // if storage refuses, it stays in the list (in memory), marked, and the app keeps trying.
+    function saveNote(text, bad) {
+        $('saveMsg').textContent = text;
+        $('saveMsg').className = bad ? 'warn' : 'hint';
+    }
+    async function autoSave(interrupted) {
+        if (curveState !== 'done') return;
         const d = roomDims();
+        const kind = curveKind;
+        const id = kind === 'sweep' ? sweepId : null;       // the same id as its checkpoint, so a recovery can never duplicate it
+        if (kind === 'sweep') sweepId = null;
         const rec = R.makeRecord({
-            time: new Date(), kind: curveKind, note: $('saveNote').value,
+            id, time: new Date(), kind, note: $('saveNote').value,
             room: { name: settings.room, lengthM: d.L, widthM: d.W, heightM: d.H },
             tempC: settings.temp, fMin: settings.fMin, fMax: settings.fMax,
             sweepDurS: settings.sweepDur, speaker: settings.speaker,
             curve, peaks: lastPeaks, app: BUILD, locationStatus: 'pending',
+            interrupted: !!interrupted, disturbed: kind === 'sweep' && disturbed,
         });
+        // the sound of a clap is always kept: it is what later analysis needs
         let wav = null;
-        if (curveKind === 'clap' && rawAudio && $('keepAudio').checked) {
+        if (kind === 'clap' && rawAudio) {
             rec.audio = R.audioInfo(rawAudio.samples.length, rawAudio.sampleRate);
             if (rec.audio) wav = R.encodeWav(rawAudio.samples, rawAudio.sampleRate);
         }
+        if (kind === 'clap' && !rec.audio) rec.audioMissing = true;
         curveState = 'saved';
-        drawChart();
-        startLocate(rec);       // before any await: a permission prompt needs the tap
-        try {
-            if (wav) await tx(['records', 'audio'], 'readwrite', (t) => { t.objectStore('audio').put({ type: 'audio/wav', buffer: wav }, rec.id); return t.objectStore('records').put(rec); });
-            else await putRecord(rec);
-        } catch (e) {
-            curveState = 'done';
-            drawChart();
-            $('saveMsg').textContent = 'Could not save: ' + (e && e.message ? e.message : 'storage error') + '.';
-            return;
-        }
         saved.unshift(rec);
-        $('saveMsg').textContent = 'Saved. It is on the Saved tab, where you can add a photo or send it.';
-        $('saveNote').value = '';
+        unstored.add(rec);
+        if (wav) memAudio.set(rec.id, wav);
+        prepared.delete('all');
         renderSaved();
-        // ask the browser not to clear this data when the phone runs low on space
-        try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch (e) { /* ignore */ }
+        startLocate(rec);
+        const ok = await storeRecord(rec);
+        retryUnstored();                    // earlier ones that are still waiting
+        renderSaved();
+        tabMarks();
+        const p = (n) => String(n).padStart(2, '0'), t = new Date(rec.time);
+        const at = p(t.getHours()) + ':' + p(t.getMinutes()) + ':' + p(t.getSeconds());
+        const what = (interrupted ? 'The interrupted ' + kind + ' was saved as far as it got, at ' : 'Saved by itself at ') + at;
+        if (!ok) {
+            saveNote('NOT STORED on the phone (' + storeError + '). The measurement of ' + at + ' is in the Saved list, held only while the app stays open: send it from there now. The app keeps trying to store it.', true);
+        } else if (kind === 'clap' && !rec.audio) {
+            saveNote(what + ', but WITHOUT ITS SOUND: the phone gave the app no raw sound for this clap. The spectrum and peaks are saved. Turn the microphone off and on before the next clap. It is number ' + saved.length + ' on the Saved tab.', true);
+        } else {
+            saveNote(what + (rec.audio ? ', with the sound of the clap' : '') + '. It is number ' + saved.length + ' on the Saved tab (top of the page): open it there to add a photo or send it.');
+        }
+        // ask the phone not to clear this data when it runs low on space, and say what it answered
+        askPersist();
+    }
+    // If the phone kills the app in the middle of a sweep no code runs, so nothing could be saved then.
+    // The points measured so far are therefore noted down every two seconds, and picked up at the next start.
+    const CHECKPOINT = 'pyramid-res-sweep-';      // + the id of the sweep: each sweep has its own safety copy
+    let checkpointAt = 0;
+    let sweepId = null;         // the id the running sweep will be saved under; its safety copy carries the same one
+    // What an earlier run of the app left behind is read once, now, before this run can write any of its own
+    const leftBehind = [];
+    try {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key.indexOf(CHECKPOINT) === 0) { try { leftBehind.push(JSON.parse(localStorage.getItem(key))); } catch (e) { /* unreadable: skipped */ } }
+        }
+    } catch (e) { /* no localStorage */ }
+    function checkpointSweep() {
+        const now = Date.now();
+        if (now - checkpointAt < 2000 || !recording || curveKind !== 'sweep') return;
+        checkpointAt = now;
+        const d = roomDims();
+        if (!sweepId) sweepId = R.makeRecord({ kind: 'sweep' }).id;
+        try {
+            localStorage.setItem(CHECKPOINT + sweepId, JSON.stringify(R.makeRecord({
+                id: sweepId, time: new Date(), kind: 'sweep', note: $('saveNote').value,
+                room: { name: settings.room, lengthM: d.L, widthM: d.W, heightM: d.H },
+                tempC: settings.temp, fMin: settings.fMin, fMax: settings.fMax, sweepDurS: settings.sweepDur, speaker: settings.speaker,
+                curve, peaks: [], app: BUILD, locationStatus: 'unavailable', interrupted: true, disturbed,
+            })));
+        } catch (e) { /* no room for it: the sweep itself goes on */ }
+    }
+    // The safety copy of a sweep is thrown away only once that very sweep is in the phone storage (or measured nothing)
+    function checkpointStored(id) { if (id) { try { localStorage.removeItem(CHECKPOINT + id); } catch (e) { /* ignore */ } } }
+    async function recoverCheckpoints() {
+        let got = 0, stored = 0, points = 0;
+        for (const rec of leftBehind.splice(0)) {
+            if (!rec || !rec.id) continue;
+            if (rec.id === sweepId) continue;                                   // the sweep running right now
+            const ok = rec.schema === R.SCHEMA && Array.isArray(rec.curve) && rec.curve.length > 0;
+            if (!ok || deleted.has(rec.id) || saved.some((r) => r.id === rec.id)) { checkpointStored(rec.id); continue; }   // nothing in it, or already saved
+            const pts = rec.curve.map((p) => ({ f: p[0], db: p[1] }));
+            rec.peaks = R.makeRecord({ kind: 'sweep', curve: pts, peaks: pts.length > 10 ? M.findPeaks(pts, 4) : [] }).peaks;
+            saved.push(rec);
+            unstored.add(rec);
+            got++; points += pts.length;
+            if (await storeRecord(rec)) stored++;
+        }
+        if (!got) return;
+        saved.sort((a, b) => (a.time < b.time ? 1 : -1));
+        renderSaved();
+        tabMarks();
+        saveNote('The app was closed in the middle of ' + (got === 1 ? 'a sweep' : got + ' sweeps') + ' last time. What had been measured up to then (' + points + ' points) was recovered and ' +
+            (stored === got ? 'saved' : 'is in the list, NOT STORED yet') + ': on the Saved tab, marked "interrupted".', stored !== got);
+    }
+
+    // A sweep cut short (Stop, the microphone taken away, a tone or setting chosen) still holds real data: keep it.
+    function keepPartialSweep() {
+        if (!(recording && curveKind === 'sweep')) return;
+        recording = false;
+        if (curve.length < 1) { checkpointStored(sweepId); sweepId = null; saveNote('That sweep measured nothing, so there was nothing to save.'); return; }
+        curveState = 'done';
+        showPeaks(curve.length > 10 ? M.findPeaks(curve, 4) : []);
+        autoSave(true);
+    }
+    // The note under the chart goes with the measurements made after it is typed. It never changes
+    // a measurement that is already saved: those have their own note field on the Saved tab.
+    function noteTyped() {
+        try { localStorage.setItem('pyramid-res-note', $('saveNote').value); } catch (e) { /* the note still works for this session */ }
+    }
+    let persistAsked = false;
+    function askPersist() {
+        const say = (kept) => { $('persistLine').textContent = kept ? 'The phone has agreed not to clear this storage by itself.' : 'The phone has not promised to keep this storage: if it runs very short of space it may clear it. Send what matters.'; };
+        try {
+            if (!(navigator.storage && navigator.storage.persist)) return;
+            if (persistAsked) { navigator.storage.persisted().then(say, () => {}); return; }
+            persistAsked = true;
+            navigator.storage.persist().then(say, () => {});
+        } catch (e) { /* ignore */ }
     }
 
     function showRecord(rec) {
@@ -1015,7 +1315,14 @@
         if ($('chartTitle').scrollIntoView) $('chartTitle').scrollIntoView({ block: 'start', behavior: 'smooth' });
     }
 
-    function pickPhoto(rec) {
+    function pickPhoto(rec, button) {
+        // a photo taken through the app exists nowhere else: replacing it needs a second tap
+        if (rec.photo && button && button.dataset.armed !== '1') {
+            button.dataset.armed = '1';
+            button.textContent = 'Replace the photo?';
+            setTimeout(() => { if (button.isConnected) { button.dataset.armed = ''; button.textContent = 'New photo'; } }, 4000);
+            return;
+        }
         photoTarget = rec;
         const input = $('photoInput');
         input.value = '';
@@ -1027,6 +1334,7 @@
         if (!rec || !file || !saved.includes(rec)) return;
         savedMsg('');
         const url = URL.createObjectURL(file);
+        photoBusy = true;
         try {
             const img = new Image();
             img.src = url;
@@ -1040,15 +1348,20 @@
             const buffer = await blob.arrayBuffer();
             const info = { name: file.name || '', type: 'image/jpeg', width: size.width, height: size.height,
                 takenTime: file.lastModified ? new Date(file.lastModified).toISOString() : null };
-            const next = Object.assign({}, rec, { photo: info });
-            await tx(['records', 'photos'], 'readwrite', (t) => { t.objectStore('photos').put({ type: 'image/jpeg', buffer }, rec.id); return t.objectStore('records').put(next); });
+            // the record says "has a photo" before the write starts, so no other write of it can say otherwise;
+            // put back if the write fails
+            const old = rec.photo, oldSent = rec.sentAt;
             rec.photo = info;
-            prepared.delete(rec.id);
+            try {
+                await dbWrite(['records', 'photos'], (t) => { t.objectStore('photos').put({ type: 'image/jpeg', buffer }, rec.id); return t.objectStore('records').put(dbCopy(rec)); });
+            } catch (e) { rec.photo = old; rec.sentAt = oldSent; throw e; }
+            touched(rec);           // also drops a prepared "send all" that would lack this photo
             if (thumbs.has(rec.id)) { URL.revokeObjectURL(thumbs.get(rec.id)); thumbs.delete(rec.id); }
         } catch (e) {
             savedMsg('The photo could not be added: ' + (e && e.message ? e.message : 'unknown error') + '.');
         } finally {
             URL.revokeObjectURL(url);
+            photoBusy = false;
         }
         renderSaved();
     }
@@ -1070,26 +1383,45 @@
         return new Promise((resolve) => cv.toBlob(resolve, 'image/png'));
     }
 
+    // The bytes of a record's sound or photo, or null if they cannot be found
+    async function blobOf(store, rec) {
+        if (store === 'audio' && memAudio.has(rec.id)) return memAudio.get(rec.id);
+        try { await ensureDb(); const x = await tx(store, 'readonly', (t) => t.objectStore(store).get(rec.id)); return x ? x.buffer : null; } catch (e) { return null; }
+    }
     async function prepareRecord(rec) {
-        const base = R.fileBase(rec);
+        const base = R.fileBase(rec), missing = [];
         const files = [new File([JSON.stringify(rec, null, 1)], base + '.json', { type: 'application/json' })];
         const png = await chartPng(rec);
         if (png) files.push(new File([png], base + '-chart.png', { type: 'image/png' }));
         if (rec.photo) {
-            const p = await tx('photos', 'readonly', (t) => t.objectStore('photos').get(rec.id));
-            if (p) files.push(new File([p.buffer], base + '-photo.jpg', { type: 'image/jpeg' }));
+            const p = await blobOf('photos', rec);
+            if (p) files.push(new File([p], base + '-photo.jpg', { type: 'image/jpeg' })); else missing.push('the photo');
         }
         if (rec.audio) {
-            const a = await tx('audio', 'readonly', (t) => t.objectStore('audio').get(rec.id));
-            if (a) files.push(new File([a.buffer], base + '-sound.wav', { type: 'audio/wav' }));
+            const a = await blobOf('audio', rec);
+            if (a) files.push(new File([a], base + '-sound.wav', { type: 'audio/wav' })); else missing.push('the sound');
         }
-        return { files, title: 'Resonance measurement', text: R.shareText(rec) };
+        return { files, title: 'Resonance measurement', text: R.shareText(rec), missing, recs: missing.length ? [] : [rec] };
     }
-    function prepareAll() {
-        const day = new Date().toISOString().slice(0, 10);
-        const body = JSON.stringify(R.exportAll(saved.slice().reverse(), BUILD), null, 1);
-        return { files: [new File([body], 'resonance-all-' + day + '.json', { type: 'application/json' })],
-            title: 'Resonance measurements', text: saved.length + ' resonance measurements. Photos and sound are not in this file: send those one measurement at a time.' };
+    // Everything: one file with all spectra, plus every sound and every photo
+    async function prepareAll() {
+        const day = new Date().toISOString().slice(0, 10), list = saved.slice().reverse(), missing = [];
+        const body = JSON.stringify(R.exportAll(list, BUILD), null, 1);
+        const json = new File([body], 'resonance-all-' + day + '.json', { type: 'application/json' });
+        const files = [json];
+        let sounds = 0, photos = 0;
+        const whole = [];           // the records that go out complete
+        for (const rec of list) {
+            const base = R.fileBase(rec);
+            let complete = true;
+            if (rec.audio) { const a = await blobOf('audio', rec); if (a) { files.push(new File([a], base + '-sound.wav', { type: 'audio/wav' })); sounds++; } else { complete = false; missing.push('the sound of ' + recTitle(rec)); } }
+            if (rec.photo) { const p = await blobOf('photos', rec); if (p) { files.push(new File([p], base + '-photo.jpg', { type: 'image/jpeg' })); photos++; } else { complete = false; missing.push('the photo of ' + recTitle(rec)); } }
+            if (complete) whole.push(rec);
+        }
+        const text = list.length + ' resonance measurements: one file with all spectra, ' + sounds + ' sound file' + (sounds === 1 ? '' : 's') + ' and ' + photos + ' photo' + (photos === 1 ? '' : 's') + '.';
+        return { files, title: 'Resonance measurements', text, missing, recs: whole,
+            // if the phone will not share that many files at once: the spectra alone, and say so plainly
+            fallback: files.length > 1 ? { files: [json], recs: list.filter((r) => !r.audio && !r.photo) } : null };
     }
 
     function download(files) {
@@ -1106,29 +1438,49 @@
     async function send(key, build, button, idleLabel) {
         savedMsg('');
         let pack = prepared.get(key);
+        const secondTry = !!pack;
         if (!pack) {
             button.disabled = true;
             try { pack = await build(); } catch (e) { savedMsg('Could not build the files: ' + (e && e.message ? e.message : 'unknown error') + '.'); button.disabled = false; return; }
             button.disabled = false;
         }
+        const notes = [];
+        if (pack.missing && pack.missing.length) notes.push('NOT INCLUDED, because the app could not find it in storage: ' + pack.missing.join(', ') + '.');
         const canShare = (files) => { try { return !!(navigator.share && navigator.canShare && navigator.canShare({ files })); } catch (e) { return false; } };
+        const asText = (files) => files.map((f) => (f.type === 'application/json' ? new File([f], f.name + '.txt', { type: 'text/plain' }) : f));
         let shareable = canShare(pack.files);
-        if (!shareable && navigator.share) {
-            // some phones refuse .json in the share sheet: offer the same text as a .txt file
-            const asText = pack.files.map((f) => (f.type === 'application/json' ? new File([f], f.name + '.txt', { type: 'text/plain' }) : f));
-            if (canShare(asText)) { pack = Object.assign({}, pack, { files: asText }); shareable = true; }
+        // some phones refuse .json in the share sheet: offer the same text as a .txt file
+        if (!shareable && navigator.share && canShare(asText(pack.files))) { pack = Object.assign({}, pack, { files: asText(pack.files) }); shareable = true; }
+        if (!shareable && navigator.share && pack.fallback) {
+            const small = canShare(pack.fallback.files) ? pack.fallback.files : canShare(asText(pack.fallback.files)) ? asText(pack.fallback.files) : null;
+            if (small) {
+                notes.push('This phone will not share ' + pack.files.length + ' files at once, so ONLY THE SPECTRA are in this send. THE SOUNDS AND PHOTOS ARE NOT: send those measurements one at a time.');
+                pack = Object.assign({}, pack, { files: small, recs: pack.fallback.recs, fallback: null });
+                shareable = true;
+            }
         }
         if (!shareable) {
             download(pack.files);
-            savedMsg('This browser cannot open a share sheet for files, so they were downloaded instead.');
+            savedMsg(['This browser cannot open a share sheet for files, so ' + pack.files.length + ' file' + (pack.files.length === 1 ? ' was' : 's were') + ' handed to it as downloads. Check that they arrived; the measurements stay marked "not sent yet".'].concat(notes).join(' '));
             return;
         }
         try {
             await navigator.share({ files: pack.files, title: pack.title, text: pack.text });
             prepared.delete(key);
             button.textContent = idleLabel;
+            // remember what has left the phone, so it is plain what has no copy elsewhere yet
+            const now = new Date().toISOString();
+            (pack.recs || []).forEach((r) => { if (saved.includes(r)) { r.sentAt = now; putRecord(r).catch(() => {}); } });
+            renderSaved();
+            savedMsg(notes.join(' '));
         } catch (e) {
-            if (e && e.name === 'AbortError') { prepared.delete(key); button.textContent = idleLabel; return; }   // closed the sheet
+            if (e && e.name === 'AbortError') { prepared.delete(key); button.textContent = idleLabel; savedMsg(['Not sent: the share sheet was closed.'].concat(notes).join(' ')); return; }   // closed the sheet
+            if (secondTry) {
+                prepared.delete(key);
+                button.textContent = idleLabel;
+                savedMsg('The phone refused to share these files (' + (e && e.message ? e.message : 'no reason given') + '). Nothing was sent and nothing was removed.' + (key === 'all' ? ' Try sending the measurements one at a time.' : ''));
+                return;
+            }
             prepared.set(key, pack);
             button.textContent = 'Tap to send';
         }
@@ -1142,30 +1494,51 @@
             setTimeout(() => { if (button.isConnected) { button.dataset.armed = ''; button.textContent = 'Delete'; } }, 4000);
             return;
         }
-        tx(['records', 'photos', 'audio'], 'readwrite', (t) => { t.objectStore('photos').delete(rec.id); t.objectStore('audio').delete(rec.id); return t.objectStore('records').delete(rec.id); })
+        const wasUnstored = unstored.has(rec);
+        deleted.add(rec.id);
+        clearTimeout(noteTimers.get(rec.id)); noteTimers.delete(rec.id);
+        dbWrite(['records', 'photos', 'audio'], (t) => { t.objectStore('photos').delete(rec.id); t.objectStore('audio').delete(rec.id); return t.objectStore('records').delete(rec.id); })
+            .catch((e) => { if (!wasUnstored) throw e; })     // one that never reached storage only has to leave the list
             .then(() => {
+                unstored.delete(rec); memAudio.delete(rec.id);
+                tabMarks();
                 saved = saved.filter((r) => r !== rec);
                 prepared.delete(rec.id); prepared.delete('all');
                 if (thumbs.has(rec.id)) { URL.revokeObjectURL(thumbs.get(rec.id)); thumbs.delete(rec.id); }
                 if (viewing === rec) { viewing = null; $('peaks').textContent = ''; drawChart(); }
                 renderSaved();
             })
-            .catch((e) => savedMsg('Could not delete: ' + (e && e.message ? e.message : 'storage error') + '.'));
+            .catch((e) => { deleted.delete(rec.id); savedMsg('Could not delete: ' + (e && e.message ? e.message : 'storage error') + '.'); });
     }
 
+    let loadFailed = false;
     async function loadSaved() {
         try {
-            db = await openDb();
-            db.onversionchange = () => { db.close(); db = null; };
-            const all = await tx('records', 'readonly', (t) => t.objectStore('records').getAll());
-            saved = (all || []).sort((a, b) => (a.time < b.time ? 1 : -1));
-            // a location search cut short by closing the app will never finish
-            saved.forEach((r) => { if (r.locationStatus === 'pending') r.locationStatus = r.location ? 'ok' : 'unavailable'; });
+            await ensureDb();
+            const all = await tx('records', 'readonly', (t) => t.objectStore('records').getAll()) || [];
+            const sounds = new Set();
+            try { const k = await tx('audio', 'readonly', (t) => t.objectStore('audio').getAllKeys()); (k || []).forEach((id) => sounds.add(id)); } catch (e) { /* the check below is then skipped */ }
+            const here = new Set(saved.map((r) => r.id));       // measured before this answer came: those stay as they are
+            const fromDisk = all.filter((r) => !here.has(r.id) && !deleted.has(r.id));
+            fromDisk.forEach((r) => {
+                // a location search cut short by closing the app will never finish
+                if (r.locationStatus === 'pending') r.locationStatus = r.location ? 'ok' : 'unavailable';
+                // written as "without sound" while its sound was still on the way: if the sound did arrive, they belong together again
+                if (r.audioPending && sounds.has(r.id)) { r.audio = r.audioPending; r.audioMissing = false; delete r.audioPending; putRecord(r).catch(() => {}); }
+            });
+            saved = saved.concat(fromDisk).sort((a, b) => (a.time < b.time ? 1 : -1));
+            if (loadFailed) { loadFailed = false; storageWarn = ''; savedMsg(''); tabMarks(); }
         } catch (e) {
-            db = null;
+            dropDb();
+            loadFailed = true;      // tried again every 15 s and whenever the app is returned to
             savedMsg('Saved measurements are not available here: ' + (e && e.message ? e.message : 'no storage') + '.');
+            // said before anything is measured, on every tab
+            storageWarn = 'Measurements CANNOT BE STORED in this browser (' + (e && e.message ? e.message : 'no storage') + '). They will be held only while the app stays open, so send each one right away. Private browsing does this: open the page in a normal tab or from the home-screen icon.';
+            tabMarks();
         }
         renderSaved();
+        if (saved.length) askPersist();
+        if (!loadFailed) recoverCheckpoints();
     }
 
     // ---------- Tabs ----------
@@ -1201,7 +1574,7 @@
         const level = voice && micOn && /dB/.test($('meterText').textContent) ? 'Microphone: ' + $('meterText').textContent : '';
         if ($('nowLevel').textContent !== level) $('nowLevel').textContent = level;
         // a warning written on a tab that is not open is repeated here, so nothing fails silently
-        const notes = [settings.tab === 'play' ? '' : $('audioWarn').textContent, settings.tab === 'measure' ? '' : $('micWarn').textContent].filter(Boolean).join(' ');
+        const notes = [storageNotice(), settings.tab === 'play' ? '' : $('audioWarn').textContent, settings.tab === 'measure' ? '' : $('micWarn').textContent].filter(Boolean).join(' ');
         if ($('notice').textContent !== notes) $('notice').textContent = notes;
         $('notice').hidden = !notes;
     }
@@ -1288,6 +1661,9 @@
     // Apply a settings change. A change that would need too many modes is undone.
     function change(mutate) {
         const before = Object.assign({}, settings);
+        // whatever is being measured is ended and saved with the settings it was measured with, before they change
+        if (voice || clapBusy) stopAll();
+        keepPartialSweep();
         mutate();
         sanitize(settings);
         // a complaint about the old settings is out of date now
@@ -1329,13 +1705,19 @@
     $('stop').addEventListener('click', stopAll);
     $('stripStop').addEventListener('click', stopAll);
     // a warning in the top bar goes away when tapped
-    $('notice').addEventListener('click', () => { $('audioWarn').textContent = ''; $('micWarn').textContent = ''; tabMarks(); });
+    $('notice').addEventListener('click', () => { $('audioWarn').textContent = ''; $('micWarn').textContent = ''; tabMarks(); });   // a storage warning stays until the problem is gone
     $('sweep').addEventListener('click', toggleSweep);
     $('mic').addEventListener('click', toggleMic);
     $('clap').addEventListener('click', recordClap);
-    $('saveBtn').addEventListener('click', saveMeasurement);
+    try { $('saveNote').value = localStorage.getItem('pyramid-res-note') || ''; } catch (e) { /* no stored note */ }
+    $('saveNote').addEventListener('input', noteTyped);      // on every keystroke: iOS may never send 'change'
+    $('saveNote').addEventListener('change', noteTyped);
+    const again = () => { if (loadFailed) loadSaved().then(retryUnstored); else retryUnstored(); };
+    setInterval(again, 15000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) again(); });
+    $('openSaved').addEventListener('click', () => showTab('saved', true));
     $('photoInput').addEventListener('change', photoChosen);
-    $('shareAll').addEventListener('click', () => send('all', async () => prepareAll(), $('shareAll'), 'Send all as one file'));
+    $('shareAll').addEventListener('click', () => send('all', async () => prepareAll(), $('shareAll'), 'Send all: spectra, sounds, photos'));
 
     // A hidden page cannot be trusted to keep playing: stop, so the screen never lies
     document.addEventListener('visibilitychange', () => {
@@ -1365,7 +1747,12 @@
     setSessionType('playback');
     // Last of all, when everything it reads exists: an automatic reload must not cut off a sound,
     // a measurement in progress, or a finished measurement that has not been saved yet.
-    if (updater) updater.busy = () => !!(voice || micOn || clapBusy || curveState === 'done' || (!$('saveBox').hidden && $('saveNote').value.trim()));
+    if (updater) updater.unstored = () => unstored.size;
+    if (updater) updater.busy = () => {
+        const a = document.activeElement;
+        const typing = !!a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && (a.type === 'text' || a.type === 'number')));
+        return !!(voice || micOn || clapBusy || recording || curveState === 'done' || unstored.size || pendingWrites || locating || photoBusy || noteTimers.size || typing);
+    };
     syncInputs();
     if (!recompute()) {
         // a stored range that is too large: fall back to the default range, keep the room

@@ -226,9 +226,9 @@ async def main():
         await page.click('#next'); await page.wait_for_timeout(900)
         check(await page.evaluate(spot) == before, 'starting a tone moves nothing on the page (a second tap lands on the same button)', before + ' -> ' + await page.evaluate(spot))
         # which control lives on which tab: this is the layout the owner agreed to
-        where = await page.evaluate("""Object.fromEntries(['mic','clap','chart','saveBtn','sweep','sweepDur','speaker','next','prev','modeFilter','modeList','savedList','shareAll','room','dimL','fMin','fMax','temp','checkUpdate','build']
+        where = await page.evaluate("""Object.fromEntries(['mic','clap','chart','saveNote','sweep','sweepDur','speaker','next','prev','modeFilter','modeList','savedList','shareAll','room','dimL','fMin','fMax','temp','checkUpdate','build']
             .map(id => [id, (document.getElementById(id).closest('.tab') || {id: 'none'}).id.replace('tab-', '')]))""")
-        want = dict(mic='measure', clap='measure', chart='measure', saveBtn='measure', sweep='measure', sweepDur='measure', speaker='measure',
+        want = dict(mic='measure', clap='measure', chart='measure', saveNote='measure', sweep='measure', sweepDur='measure', speaker='measure',
                     next='play', prev='play', modeFilter='play', modeList='play', savedList='saved', shareAll='saved',
                     room='setup', dimL='setup', fMin='setup', fMax='setup', temp='setup', checkUpdate='setup', build='setup')
         check(where == want, 'every control is on its agreed tab', {k: v for k, v in where.items() if want[k] != v})
@@ -293,8 +293,46 @@ async def main():
         if tracks == 0:
             await page.click('#mic'); await page.wait_for_timeout(1000)
         check(await page.evaluate("meterText.textContent") != 'Microphone off', 'the level meter runs', await page.evaluate("meterText.textContent"))
+        # a sweep cut short keeps what it measured: by Stop ...
+        count = "document.querySelectorAll('#savedList .rec').length"
+        n = await page.evaluate(count)
+        await page.click('#sweep'); await page.wait_for_timeout(6000)
+        await page.click('#stop')
+        await page.wait_for_function(count + " === %d" % (n + 1), timeout=5000)
+        check('interrupted' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent") and 'interrupted sweep was saved' in await page.evaluate("saveMsg.textContent") and 'interrupted' in await page.evaluate("recentList.children[0].textContent"),
+              'a sweep stopped part way is saved as far as it got, and labelled in both lists', await page.evaluate("saveMsg.textContent"))
+        # ... and by the system taking the microphone away
+        await page.click('#sweep'); await page.wait_for_timeout(6000)
+        await page.evaluate("window.__tracks.filter(t => t.readyState === 'live').forEach(t => { t.stop(); t.dispatchEvent(new Event('ended')); })")
+        await page.wait_for_function(count + " === %d" % (n + 2), timeout=5000)
+        check('taken away' in await page.evaluate("micWarn.textContent") and 'interrupted' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent"),
+              'a sweep cut off by losing the microphone is saved too')
+        # ... by tapping a tone, then starting a new sweep over it
+        await page.click('#stop', force=True); await page.wait_for_timeout(300)
+        await page.click('#mic'); await page.wait_for_timeout(1200)
+        await page.click('#sweep'); await page.wait_for_timeout(5000)
+        await page.click('#next'); await page.wait_for_timeout(600)
+        await page.wait_for_function(count + " === %d" % (n + 3), timeout=5000)
+        check('interrupted' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent"), 'a sweep replaced by tapping a tone is saved at that moment')
+        await page.click('#stop'); await page.wait_for_timeout(2600)
+        # ... and one so short that it has only a few points
+        await page.click('#sweep'); await page.wait_for_timeout(900)
+        pts = await page.evaluate("chart.dataset.points")
+        await page.click('#stop')
+        await page.wait_for_function(count + " === %d" % (n + 4), timeout=5000)
+        check(0 < int(pts) <= 10, '(test setup) that sweep had 10 points or fewer', pts)
+        check(True, 'a sweep with only a few points is saved too')
+        n += 2
+        await page.click('#mic'); await page.wait_for_timeout(500)     # off again, as the next step expects
+        await page.click('#stop', force=True); await page.wait_for_timeout(300)
+        await page.click('#mic'); await page.wait_for_timeout(1200)
+        check(await page.evaluate("meterText.textContent") != 'Microphone off', '(test setup) the microphone is back on', await page.evaluate("meterText.textContent"))
         await page.click('#sweep')
         await page.wait_for_timeout(31500)
+        check(await page.evaluate(count) == n + 3 and 'Saved by itself at' in await page.evaluate("saveMsg.textContent") and 'Saved tab' in await page.evaluate("saveMsg.textContent"),
+              'a finished sweep is saved by itself, and the page says where', await page.evaluate("saveMsg.textContent"))
+        await page.click('#openSaved')
+        check(await page.evaluate("!document.getElementById('tab-saved').hidden"), 'a button under the chart opens the saved measurements')
         rows = await page.evaluate(PEAKS)
         got = [float(r[0].split()[0]) for r in rows] if rows else []
         best = min(got, key=lambda f: abs(f - F0)) if got else None
@@ -353,14 +391,30 @@ async def main():
 
         # ---- saving the measurement, with location, photo and sending
         import json, base64
-        check(await page.evaluate("!saveBox.hidden && !saveBtn.disabled"), 'a finished clap can be saved')
-        check(await page.evaluate("!keepAudioRow.hidden && keepAudio.checked && /^[34]\\.\\d s, [01]\\.\\d MB$/.test(keepAudioSize.textContent)"), 'and offers to keep its sound', await page.evaluate("keepAudioSize.textContent"))
+        # every measurement made above was stored without a tap
+        n0 = await page.evaluate("document.querySelectorAll('#savedList .rec').length")
+        check(n0 >= 2 and await page.evaluate("savedCount.textContent.trim()") == str(n0), 'every finished measurement was saved by itself, and the Saved tab counts them', n0)
+        check('Saved by itself at' in await page.evaluate("saveMsg.textContent") and 'sound' in await page.evaluate("saveMsg.textContent"), 'the page says so, and that the sound of the clap was kept', await page.evaluate("saveMsg.textContent"))
+        check(await page.evaluate("!recentBox.hidden && recentList.children.length") == min(n0, 5) and str(n0) + ' saved on this phone' in await page.evaluate("recentTitle.textContent")
+              and re.match(r'\d\d:\d\d:\d\d (clap|sweep)', await page.evaluate("recentList.children[0].textContent")), 'the newest measurements are listed under the chart', await page.evaluate("recentList.children[0].textContent"))
+        check(await page.evaluate("document.getElementById('saveBtn') === null && document.getElementById('keepAudio') === null"), 'there is no Save button and no way to switch the sound off')
+        check(await page.evaluate("PyramidUpdate.busy() === false"), 'a measurement that is already stored does not hold back an update')
         await page.evaluate(SHARE_MOCK)
+        # keep only the newest, so the rest of this section can count
+        while await page.evaluate("document.querySelectorAll('#savedList .rec').length") > 1:
+            await page.click('#savedList .rec:last-child [data-role=delete]'); await page.click('#savedList .rec:last-child [data-role=delete]'); await page.wait_for_timeout(250)
+        # the note under the chart is for the measurements to come: it must not relabel the one already saved
+        await page.fill('#saveNote', 'Next room')
+        check(await page.evaluate("localStorage.getItem('pyramid-res-note')") == 'Next room', 'the note for the next measurements is kept as it is typed, without leaving the field')
+        await page.dispatch_event('#saveNote', 'change'); await page.wait_for_timeout(700)
+        check('Next room' not in await page.evaluate("document.querySelector('#savedList .rec b').textContent"), 'and it does not rename a measurement that is already saved')
         await page.fill('#saveNote', 'Test room, niche 3')
-        check(await page.evaluate("PyramidUpdate.busy() === true"), 'an unsaved measurement holds back the automatic reload into a new version')
-        await page.click('#saveBtn')
-        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 1", timeout=5000)
-        check(await page.evaluate("saveBtn.disabled && saveBtn.textContent === 'Saved'"), 'the same measurement cannot be saved twice')
+        # each saved measurement has its own note
+        await page.fill('#savedList .rec .recNote', 'Test room, niche 3'); await page.wait_for_timeout(900)
+        check(await page.evaluate("document.activeElement.classList.contains('recNote')") and 'niche 3' in await page.evaluate("document.querySelector('#savedList .rec b').textContent"),
+              'a saved measurement has its own note field, stored as it is typed')
+        check('not sent yet' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent") and 'not sent yet' in await page.evaluate("savedSummary.textContent") and 'home screen' in await page.evaluate("document.getElementById('tab-saved').textContent"),
+              'the Saved tab says what has not been sent yet and where the data lives', await page.evaluate("savedSummary.textContent"))
         await page.wait_for_function("document.querySelector('#savedList [data-role=location]').textContent.includes('-13.50981')", timeout=20000)
         loc = await page.evaluate("document.querySelector('#savedList [data-role=location]').textContent")
         check('-71.98171' in loc and '±7 m' in loc and 'improving' not in loc, 'the location is stored with its accuracy', loc)
@@ -376,16 +430,14 @@ async def main():
             await page.wait_for_timeout(100); waited += 100
             if 'now' in (await page.evaluate("clap.textContent")).lower(): break
         await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
-        check(await page.evaluate("!saveBox.hidden && !saveBtn.disabled"), 'a new measurement can be saved again')
-        await page.uncheck('#keepAudio')
-        await page.click('#saveBtn')
         await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 2", timeout=5000)
+        check('niche 3' in await page.evaluate("document.querySelector('#savedList .rec:first-child b').textContent"), 'the next measurement is saved by itself too, with the same note')
         check(await page.evaluate("!shareAll.hidden"), 'two saved measurements offer "send all"')
         await page.click('#savedList .rec:last-child [data-role=show]'); await page.wait_for_timeout(300)
-        check(await page.evaluate("chartTitle.textContent.startsWith('Saved: ') && chartTitle.textContent.includes('niche 3') && saveBox.hidden"), 'a saved measurement can be shown again', await page.evaluate("chartTitle.textContent"))
+        check(await page.evaluate("chartTitle.textContent.startsWith('Saved: ') && chartTitle.textContent.includes('niche 3')"), 'a saved measurement can be shown again', await page.evaluate("chartTitle.textContent"))
         check('117' in await page.evaluate("peaks.textContent"), 'with its peaks')
         await page.click('#next'); await page.wait_for_timeout(300)
-        check(await page.evaluate("chartTitle.textContent.includes('clap spectrum') && !saveBox.hidden"), 'playing a tone returns to the live measurement')
+        check(await page.evaluate("chartTitle.textContent.includes('clap spectrum')"), 'playing a tone returns to the live measurement')
         await page.click('#stop', force=True); await page.wait_for_timeout(200)
 
         # photo
@@ -397,6 +449,9 @@ async def main():
         await (await fc.value).set_files({'name': 'IMG_0001.jpg', 'mimeType': 'image/jpeg', 'buffer': base64.b64decode(big)})
         await page.wait_for_function("document.querySelector('#savedList .rec:last-child img') && document.querySelector('#savedList .rec:last-child img').naturalWidth > 0", timeout=8000)
         check(await page.evaluate("document.querySelector('#savedList .rec:last-child img').naturalWidth") == 1600, 'a photo is attached, reduced to 1600 px')
+        await page.click('#savedList .rec:last-child [data-role=photo]'); await page.wait_for_timeout(200)
+        check(await page.evaluate("document.querySelector('#savedList .rec:last-child [data-role=photo]').textContent") == 'Replace the photo?', 'replacing a photo needs a second tap')
+        await page.wait_for_timeout(4200)
         async with page.expect_file_chooser() as fc:
             await page.click('#savedList .rec:first-child [data-role=photo]')
         await (await fc.value).set_files({'name': 'notes.txt', 'mimeType': 'text/plain', 'buffer': b'not a picture'})
@@ -423,14 +478,39 @@ async def main():
               and any(abs(p['f'] - F0) < 3 for p in data['peaks']), 'the data file holds the spectrum, peaks, place and note', {k: data.get(k) for k in ('time', 'location', 'peaks')})
         check('Location: -13.50981' in shares[0]['text'] and 'maps.google.com' in shares[0]['text'], 'and the message text names the place')
         check(shares[0]['files'][1]['size'] > 3000 and shares[0]['files'][2]['size'] > 3000, 'chart and photo files are not empty')
+        check(await page.evaluate("[...document.querySelectorAll('#savedList .rec .flags')].map(f => f.textContent.includes('not sent yet') ? 'no' : f.textContent.includes('sent ') ? 'yes' : '?').join()") == 'no,yes', 'a measurement that was sent is marked as sent, the other is not')
         await page.click('#shareAll'); await page.wait_for_timeout(500)
         shares = await page.evaluate("window.__shares")
         everything = json.loads(shares[-1]['files'][0]['text'])
         check(len(shares) == 2 and everything['count'] == 2 and everything['measurements'][0]['note'] == 'Test room, niche 3', '"send all" gives one file with both, oldest first')
-        check(everything['measurements'][1]['audio'] is None, 'a measurement saved with "Keep the sound" unticked has none')
+        kinds = sorted(f['name'].rsplit('-', 1)[-1] if '-sound' in f['name'] or '-photo' in f['name'] else 'all.json' for f in shares[-1]['files'])
+        check(kinds == ['all.json', 'photo.jpg', 'sound.wav', 'sound.wav'] and all(m['audio'] for m in everything['measurements']) and '2 sound files and 1 photo' in shares[-1]['text'],
+              '"send all" also carries every sound and every photo', [f['name'] for f in shares[-1]['files']])
+        check(await page.evaluate("savedSummary.textContent.includes('all sent')"), 'after it everything is marked as sent', await page.evaluate("savedSummary.textContent"))
+        # a measurement changed after sending is no longer "sent": the copy outside the phone is out of date
+        await page.fill('#savedList .rec:first-child .recNote', 'Test room, niche 3 b'); await page.dispatch_event('#savedList .rec:first-child .recNote', 'change'); await page.wait_for_timeout(500)
+        check('not sent yet' in await page.evaluate("document.querySelector('#savedList .rec:first-child .flags').textContent") and '1 not sent yet' in await page.evaluate("savedSummary.textContent"),
+              'editing the note of a sent measurement marks it as not sent again', await page.evaluate("savedSummary.textContent"))
+        await page.fill('#savedList .rec:first-child .recNote', 'Test room, niche 3 c')
+        await page.click('#savedList .rec:first-child [data-role=delete]'); await page.wait_for_timeout(200)
+        check(await page.evaluate("document.querySelector('#savedList .rec:first-child [data-role=delete]').textContent") == 'Really delete?' and 'niche 3 c' in await page.evaluate("document.querySelector('#savedList .rec:first-child b').textContent"),
+              'the tap that ends typing a note is not swallowed, and the note is kept')
+        await page.wait_for_timeout(4200)
+        # its sound disappears from storage: sending says so and does not mark it as sent
+        await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const id = document.querySelector('#savedList .rec:first-child').dataset.id;
+            const t = q.result.transaction('audio', 'readwrite'); t.objectStore('audio').delete(id); t.oncomplete = () => { q.result.close(); done(); }; }; })""")
+        await page.click('#savedList .rec:first-child [data-role=share]'); await page.wait_for_timeout(700)
+        check('NOT INCLUDED' in await page.evaluate("savedMsg.textContent") and 'the sound' in await page.evaluate("savedMsg.textContent")
+              and 'not sent yet' in await page.evaluate("document.querySelector('#savedList .rec:first-child .flags').textContent"), 'a send that had to leave the sound out says so and does not count as sent', await page.evaluate("savedMsg.textContent"))
+        # a phone that refuses many files at once: the spectra go alone, and the page says what is missing
+        await page.evaluate("navigator.canShare = (d) => !!(d && d.files && d.files.length === 1)")
+        await page.click('#shareAll'); await page.wait_for_timeout(500)
+        shares = await page.evaluate("window.__shares")
+        check(len(shares[-1]['files']) == 1 and 'SOUNDS AND PHOTOS ARE NOT' in await page.evaluate("savedMsg.textContent"), 'if the phone refuses many files, the page says the sounds and photos were left out', await page.evaluate("savedMsg.textContent"))
+        await page.evaluate("navigator.canShare = (d) => !!(d && d.files && d.files.length)")
         await page.click('#savedList .rec:first-child [data-role=share]'); await page.wait_for_timeout(500)
         shares = await page.evaluate("window.__shares")
-        check([f['name'].rsplit('.', 1)[1] for f in shares[-1]['files']] == ['json', 'png'], 'and sends no sound file', [f['name'] for f in shares[-1]['files']])
+        check([f['name'].rsplit('.', 1)[1] for f in shares[-1]['files']] == ['json', 'png'], 'and what it did send is the data and the chart', [f['name'] for f in shares[-1]['files']])
 
         # still there after closing and reopening the app
         await page.reload()
@@ -467,11 +547,146 @@ async def main():
             await page.wait_for_timeout(100); waited += 100
             if 'now' in (await page.evaluate("clap.textContent")).lower(): break
         await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
-        await page.click('#saveBtn')
         await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 1", timeout=5000)
         await page.wait_for_function("document.querySelector('#savedList [data-role=location]').textContent.includes('not allowed')", timeout=20000)
         check(True, 'with location refused the measurement is saved and says why it has no place')
         check(not errors, 'no page errors (no location)', errors)
+
+        # no storage (private browsing): said at once on every tab; a measurement is then held in memory, listed, marked and sendable
+        page, errors = await new_page(browser, url, pre="indexedDB.open = () => { throw new Error('blocked for the test'); };")
+        await page.wait_for_function("!notice.hidden && notice.textContent.includes('CANNOT BE STORED')", timeout=5000)
+        check(True, 'with no storage the top bar warns before anything is measured')
+        await page.evaluate(SHARE_MOCK)
+        for i in (1, 2):
+            if i == 1: await page.click('#mic'); await page.wait_for_timeout(900)
+            await page.click('#clap')
+            waited = 0
+            while waited < 12000:
+                await page.wait_for_timeout(100); waited += 100
+                if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+            await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        check(await page.evaluate("saveMsg.textContent.startsWith('NOT STORED') && notice.textContent.includes('2 measurements are NOT STORED') && PyramidUpdate.busy() === true"),
+              'measurements that could not be stored say NOT STORED under the chart and in the top bar', await page.evaluate("notice.textContent"))
+        check(await page.evaluate("document.querySelectorAll('#savedList .rec').length") == 2 and await page.evaluate("[...document.querySelectorAll('#savedList .rec .flags')].every(f => f.textContent.includes('NOT STORED ON THE PHONE'))"),
+              'and the second clap did not destroy the first: both are in the list, marked')
+        await page.click('#notice'); await page.wait_for_timeout(600)
+        check(await page.evaluate("!notice.hidden && notice.textContent.includes('NOT STORED')"), 'that warning cannot be dismissed while the problem lasts')
+        await page.evaluate("updateNote.hidden = false")
+        await page.click('#reload'); await page.wait_for_timeout(300)
+        check('NOT STORED and would be lost' in await page.evaluate("document.getElementById('reload').textContent") and await page.evaluate("document.querySelectorAll('#savedList .rec').length") == 2,
+              '"Load the new version" does not reload over measurements that are only in memory without a second tap', await page.evaluate("document.getElementById('reload').textContent"))
+        await page.evaluate("updateNote.hidden = true")
+        await page.click('#savedList .rec:last-child [data-role=share]'); await page.wait_for_timeout(700)
+        sent = await page.evaluate("window.__shares")
+        check(len(sent) == 1 and [f['name'].rsplit('.', 1)[1] for f in sent[0]['files']] == ['json', 'png', 'wav'] and sent[0]['files'][2]['size'] > 100000,
+              'a measurement held only in memory can still be sent, with its sound', [f['name'] for f in sent[0]['files']] if sent else sent)
+        # storage comes back: the waiting measurements are written without anyone asking
+        await page.evaluate("(() => { delete indexedDB.open; })()")
+        await page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+        await page.wait_for_function("[...document.querySelectorAll('#savedList .rec .flags')].every(f => !f.textContent.includes('NOT STORED'))", timeout=8000)
+        check(await page.evaluate("notice.hidden || !notice.textContent.includes('NOT STORED')"), 'when storage works again the waiting measurements are stored by themselves and the warning goes')
+        errors[:] = [e for e in errors if 'blocked for the test' not in e]
+        await page.wait_for_timeout(800)
+        stored = await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const t = q.result.transaction(['records', 'audio']);
+            const a = t.objectStore('records').getAll(), b = t.objectStore('audio').count();
+            t.oncomplete = () => done([a.result.length, a.result.filter(r => r.audio && !r.audioMissing).length, b.result]); }; })""")
+        check(stored == [2, 2, 2], 'and both are really in the phone storage now, each with its sound', stored)
+        # the storage connection dies in the middle of a session (iOS does this after the app was in the background)
+        await page.evaluate("(() => { const real = IDBDatabase.prototype.transaction; window.__dead = true; IDBDatabase.prototype.transaction = function () { if (window.__dead && !this.__fresh) throw new DOMException('The database connection is closing.', 'InvalidStateError'); return real.apply(this, arguments); }; const open = indexedDB.open.bind(indexedDB); indexedDB.open = function () { const rq = open.apply(null, arguments); rq.addEventListener('success', () => { rq.result.__fresh = true; }); return rq; }; })()")
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5600)
+        check(await page.evaluate("document.querySelectorAll('#savedList .rec').length") == 3 and 'NOT STORED' not in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent")
+              and 'Saved by itself' in await page.evaluate("saveMsg.textContent"), 'when the storage connection has died, the app opens a new one and the next clap is stored', await page.evaluate("saveMsg.textContent"))
+
+        # a clap cut short keeps what was recorded
+        page, errors = await new_page(browser, url)
+        await page.click('#mic'); await page.wait_for_timeout(900)
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(1800)
+        await page.evaluate("window.__tracks.filter(t => t.readyState === 'live').forEach(t => { t.stop(); t.dispatchEvent(new Event('ended')); })")
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 1", timeout=5000)
+        first = await page.evaluate("document.querySelector('#savedList .rec').textContent")
+        check('interrupted' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent") and re.search(r'sound [12]\.\d s', first) is not None and 'NO SOUND' not in first,
+              'a clap cut off after 2 s is saved with the sound recorded so far, marked interrupted', first[:160])
+        check('interrupted clap was saved' in await page.evaluate("saveMsg.textContent") and 'taken away' in await page.evaluate("micWarn.textContent"), 'and the page says so', await page.evaluate("saveMsg.textContent"))
+        # an older measurement opened in the middle of a clap
+        await page.click('#mic'); await page.wait_for_timeout(1200)
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(1500)
+        await page.click('#recentList button')
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 2", timeout=5000)
+        check(True, 'a clap cut off by opening an older measurement is saved too')
+        # the app sent to the background in the middle of a clap
+        await page.click('#mic', force=True); await page.wait_for_timeout(400)
+        if await page.evaluate("meterText.textContent") == 'Microphone off':
+            await page.click('#mic'); await page.wait_for_timeout(1200)
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(1500)
+        await page.evaluate("(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange')); })()")
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 3", timeout=5000)
+        check('interrupted' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent"), 'a clap cut off by the app going to the background is saved too')
+        await page.evaluate("(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')); })()")
+        # a setting changed in the middle of a clap: the clap is saved with the range it was recorded with
+        await page.wait_for_timeout(600)
+        if await page.evaluate("meterText.textContent") == 'Microphone off':
+            await page.click('#mic'); await page.wait_for_timeout(1200)
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(1500)
+        await page.evaluate("(() => { const el = document.getElementById('fMax'); el.value = '300'; el.dispatchEvent(new Event('change', { bubbles: true })); })()")
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 4", timeout=5000)
+        check('250 Hz' in await page.evaluate("document.querySelector('#savedList .rec p').textContent") and await page.evaluate("fMax.value") == '300',
+              'a clap cut off by changing a setting is saved with the range it was recorded with', await page.evaluate("document.querySelector('#savedList .rec p').textContent"))
+        await page.evaluate("(() => { const el = document.getElementById('fMax'); el.value = '250'; el.dispatchEvent(new Event('change', { bubbles: true })); })()")
+
+        # the phone shuts the app down in the middle of a sweep: at the next start the sweep is there
+        await page.wait_for_timeout(2600)
+        if await page.evaluate("meterText.textContent") == 'Microphone off':
+            await page.click('#mic'); await page.wait_for_timeout(1200)
+        await page.click('#sweep'); await page.wait_for_timeout(7000)
+        check(await page.evaluate("Object.keys(localStorage).filter(k => k.startsWith('pyramid-res-sweep-')).length") == 1, 'a running sweep is noted down as it goes')
+        # as when iOS ends the app: no code of the old page gets to run on the way out
+        await page.evaluate("['visibilitychange', 'pagehide', 'beforeunload', 'freeze'].forEach(n => { document.addEventListener(n, e => e.stopImmediatePropagation(), true); window.addEventListener(n, e => e.stopImmediatePropagation(), true); })")
+        await page.reload()
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 5", timeout=8000)
+        check('interrupted' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent") and 'recovered' in await page.evaluate("saveMsg.textContent")
+              and await page.evaluate("Object.keys(localStorage).filter(k => k.startsWith('pyramid-res-sweep-')).length") == 0, 'after the app was killed mid-sweep, the sweep is recovered at the next start', await page.evaluate("saveMsg.textContent"))
+        await page.reload(); await page.wait_for_timeout(1200)
+        check(await page.evaluate("document.querySelectorAll('#savedList .rec').length") == 5, 'and it is recovered once, not again at every start')
+        check(not errors, 'no page errors (interrupted claps)', errors)
+
+        # a clap without the raw sound is saved and plainly marked
+        page, errors = await new_page(browser, url, pre="window.AudioWorkletNode = undefined; (window.AudioContext || window.webkitAudioContext).prototype.createScriptProcessor = undefined;")
+        await page.click('#mic'); await page.wait_for_timeout(1200)
+        check('WITHOUT their sound' in await page.evaluate("micWarn.textContent"), 'when the phone gives no raw sound, the page says so as soon as the microphone is on', await page.evaluate("micWarn.textContent"))
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        check('WITHOUT ITS SOUND' in await page.evaluate("saveMsg.textContent") and 'NO SOUND' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent")
+              and 'NO SOUND' in await page.evaluate("recentList.children[0].textContent"), 'a clap saved without sound is marked NO SOUND under the chart and in both lists', await page.evaluate("saveMsg.textContent"))
+        check(not errors, 'no page errors (no storage)', errors)
         await page.close()
 
         # ---- offline cache and updates, with the real service worker, on a copy of the site
