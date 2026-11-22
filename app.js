@@ -320,6 +320,7 @@
         const v = voice;
         stopVoice();
         if (v && v.kind === 'sweep') abortSweep();
+        keepPartialSweep();
         recording = false;
         cancelClap();
         onStopped(null);
@@ -422,6 +423,7 @@
         if (wasRecording && curveKind === 'sweep' && curve.length > 10) {
             curveState = 'done';
             showPeaks(M.findPeaks(curve, 4));
+            autoSave(false);
         } else if (wasRecording) showPeaks([]);
     }
 
@@ -549,6 +551,7 @@
         clearInterval(meterTimer); meterTimer = null;
         cancelClap();
         stopTap();
+        keepPartialSweep();
         recording = false;
         if (micSource) { try { micSource.disconnect(); } catch (e) { /* ignore */ } }
         if (micStream) micStream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
@@ -683,6 +686,7 @@
             const peaks = M.findPeaks(curve, 4);
             if (oldF != null) peaks.forEach((p) => { if (Math.abs(p.f - oldF) / oldF * 100 <= MATCH_TOL) p.echo = true; });
             showPeaks(peaks);
+            autoSave(false);
             drawChart();
         }, 60);
     }
@@ -827,13 +831,6 @@
             const cf = cursorF != null ? cursorF : (voice && voice.kind === 'tone' ? voice.f1 : null);
             paintChart(g, Wd, Hd, { f1: settings.fMin, f2: settings.fMax, curve, marks: shown, cursor: cf });
         }
-        // the save box follows the chart: only a finished, live measurement can be saved
-        const can = !viewing && (curveState === 'done' || curveState === 'saved') && !recording && !clapBusy;
-        $('saveBox').hidden = !can;
-        $('saveBtn').disabled = curveState === 'saved';
-        $('saveBtn').textContent = curveState === 'saved' ? 'Saved' : 'Save this measurement';
-        $('keepAudioRow').hidden = !(curveKind === 'clap' && rawAudio);
-        if (!$('keepAudioRow').hidden) $('keepAudioSize').textContent = (rawAudio.samples.length / rawAudio.sampleRate).toFixed(1) + ' s, ' + (rawAudio.samples.length * 4 / 1e6).toFixed(1) + ' MB';
     }
 
     // ---------- Saved measurements ----------
@@ -883,6 +880,20 @@
         const host = $('savedList');
         host.textContent = '';
         $('savedEmpty').hidden = saved.length > 0;
+        $('savedCount').textContent = saved.length ? ' ' + saved.length : '';
+        // the newest few are also listed right under the chart, so each new measurement is seen to arrive
+        $('recentBox').hidden = saved.length === 0;
+        $('recentTitle').textContent = saved.length + ' saved on this phone. Newest first' + (saved.length > 5 ? ' (the last 5; all are on the Saved tab)' : '') + ':';
+        $('recentList').textContent = '';
+        saved.slice(0, 5).forEach((rec) => {
+            const b = document.createElement('button'), t = document.createElement('b');
+            b.type = 'button';
+            t.textContent = R.localParts(rec).time + ':' + R.localParts(rec).compact.slice(4);
+            b.appendChild(t);
+            b.appendChild(document.createTextNode(' ' + rec.kind + (rec.audio ? ' + sound' : '') + ' · ' + R.peakSummary(rec, 3) + (rec.note ? ' · ' + rec.note : '')));
+            b.addEventListener('click', () => showRecord(rec));
+            $('recentList').appendChild(b);
+        });
         $('shareAll').hidden = saved.length < 2;
         const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
         saved.forEach((rec) => {
@@ -923,7 +934,7 @@
         } catch (e) { /* the list still works without the picture */ }
     }
 
-    // Started straight from the Save tap. Keeps the best fix of the first 15 s, or stops early at 10 m.
+    // Started when a measurement is saved. Keeps the best fix of the first 15 s, or stops early at 10 m.
     function startLocate(rec) {
         if (!navigator.geolocation) { rec.locationStatus = 'unavailable'; return; }
         let done = false, watch = null, timer = null;
@@ -953,40 +964,91 @@
         timer = setTimeout(() => finish('unavailable'), 15000);
     }
 
-    async function saveMeasurement() {
+    // Every finished measurement is stored at once, with no tap: nothing measured may be lost
+    // because a button was not pressed. curveState 'done' therefore only ever means "could not be stored".
+    let lastAuto = null;        // the record of the measurement on screen, so a note typed afterwards reaches it
+    let storageWarn = '';       // shown in the top bar on every tab until the next successful save
+    const INTERRUPTED = 'Interrupted sweep.';
+    function notSaved(why) {
+        storageWarn = 'NOT SAVED: ' + why + ' This measurement exists only on the screen and is lost when the next one starts.';
+        $('saveMsg').textContent = storageWarn;
+        $('saveMsg').className = 'warn';
+        tabMarks();
+    }
+    async function autoSave(partial) {
         if (curveState !== 'done' || viewing) return;
-        if (!db) { $('saveMsg').textContent = 'Saving is not available in this browser (private browsing blocks it).'; return; }
+        if (!db) { notSaved('this browser cannot store measurements here (private browsing blocks it).'); return; }
         const d = roomDims();
         const rec = R.makeRecord({
-            time: new Date(), kind: curveKind, note: $('saveNote').value,
+            time: new Date(), kind: curveKind, note: (partial ? INTERRUPTED + ' ' : '') + $('saveNote').value,
             room: { name: settings.room, lengthM: d.L, widthM: d.W, heightM: d.H },
             tempC: settings.temp, fMin: settings.fMin, fMax: settings.fMax,
             sweepDurS: settings.sweepDur, speaker: settings.speaker,
             curve, peaks: lastPeaks, app: BUILD, locationStatus: 'pending',
         });
+        // the sound of a clap is always kept: it is what later analysis needs
         let wav = null;
-        if (curveKind === 'clap' && rawAudio && $('keepAudio').checked) {
+        if (curveKind === 'clap' && rawAudio) {
             rec.audio = R.audioInfo(rawAudio.samples.length, rawAudio.sampleRate);
             if (rec.audio) wav = R.encodeWav(rawAudio.samples, rawAudio.sampleRate);
         }
         curveState = 'saved';
-        drawChart();
-        startLocate(rec);       // before any await: a permission prompt needs the tap
+        lastAuto = rec;
+        startLocate(rec);
+        const put = (withSound) => (withSound
+            ? tx(['records', 'audio'], 'readwrite', (t) => { t.objectStore('audio').put({ type: 'audio/wav', buffer: wav }, rec.id); return t.objectStore('records').put(rec); })
+            : putRecord(rec));
+        let soundLost = false;
         try {
-            if (wav) await tx(['records', 'audio'], 'readwrite', (t) => { t.objectStore('audio').put({ type: 'audio/wav', buffer: wav }, rec.id); return t.objectStore('records').put(rec); });
-            else await putRecord(rec);
+            await put(!!wav);
         } catch (e) {
-            curveState = 'done';
-            drawChart();
-            $('saveMsg').textContent = 'Could not save: ' + (e && e.message ? e.message : 'storage error') + '.';
-            return;
+            // most likely the phone is out of space: the spectrum alone is small, so try to keep at least that
+            try {
+                if (!wav) throw e;
+                delete rec.audio;
+                await put(false);
+                soundLost = true;
+            } catch (e2) {
+                if (lastAuto === rec) { curveState = 'done'; lastAuto = null; }
+                notSaved((e2 && e2.message ? e2.message : 'storage error') + '.');
+                return;
+            }
         }
         saved.unshift(rec);
-        $('saveMsg').textContent = 'Saved. It is on the Saved tab, where you can add a photo or send it.';
-        $('saveNote').value = '';
         renderSaved();
+        const p = (n) => String(n).padStart(2, '0'), t = new Date(rec.time);
+        if (soundLost) {
+            storageWarn = 'The last clap was saved WITHOUT its sound: the phone did not accept the sound file (storage may be full). The spectrum and peaks are saved.';
+            $('saveMsg').textContent = storageWarn;
+            $('saveMsg').className = 'warn';
+        } else {
+            storageWarn = '';
+            $('saveMsg').textContent = (partial ? 'The interrupted sweep was saved as far as it got, at ' : 'Saved by itself at ') + p(t.getHours()) + ':' + p(t.getMinutes()) + ':' + p(t.getSeconds()) +
+                (rec.audio ? ', with the sound of the clap' : '') + '. It is number ' + saved.length + ' on the Saved tab (top of the page): open it there to add a photo or send it.';
+            $('saveMsg').className = 'hint';
+        }
+        tabMarks();
         // ask the browser not to clear this data when the phone runs low on space
         try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch (e) { /* ignore */ }
+    }
+    // A sweep cut short (Stop, the microphone taken away, a setting changed) still holds real data: keep it.
+    function keepPartialSweep() {
+        if (!(recording && curveKind === 'sweep' && curve.length > 10)) return;
+        recording = false;
+        curveState = 'done';
+        showPeaks(M.findPeaks(curve, 4));
+        autoSave(true);
+    }
+    // The note is remembered across restarts and goes with every measurement. Changed while a
+    // measurement is on screen, it is also written to that measurement.
+    function noteChanged() {
+        const text = $('saveNote').value;
+        try { localStorage.setItem('pyramid-res-note', text); } catch (e) { /* the note still works for this session */ }
+        const rec = lastAuto;
+        if (!rec || curveState !== 'saved' || !saved.includes(rec)) return;
+        rec.note = ((rec.note.startsWith(INTERRUPTED) ? INTERRUPTED + ' ' : '') + text).trim().slice(0, 200);
+        putRecord(rec).then(() => { renderSaved(); $('saveMsg').textContent = 'Note written to the measurement on screen, and kept for the next ones.'; $('saveMsg').className = 'hint'; },
+            () => { $('saveMsg').textContent = 'The note could not be written to the saved measurement.'; $('saveMsg').className = 'warn'; });
     }
 
     function showRecord(rec) {
@@ -1164,6 +1226,9 @@
         } catch (e) {
             db = null;
             savedMsg('Saved measurements are not available here: ' + (e && e.message ? e.message : 'no storage') + '.');
+            // said before anything is measured, on every tab
+            storageWarn = 'Measurements CANNOT BE SAVED in this browser (' + (e && e.message ? e.message : 'no storage') + '). Private browsing blocks it: open the page in a normal tab or from the home-screen icon.';
+            tabMarks();
         }
         renderSaved();
     }
@@ -1201,7 +1266,7 @@
         const level = voice && micOn && /dB/.test($('meterText').textContent) ? 'Microphone: ' + $('meterText').textContent : '';
         if ($('nowLevel').textContent !== level) $('nowLevel').textContent = level;
         // a warning written on a tab that is not open is repeated here, so nothing fails silently
-        const notes = [settings.tab === 'play' ? '' : $('audioWarn').textContent, settings.tab === 'measure' ? '' : $('micWarn').textContent].filter(Boolean).join(' ');
+        const notes = [storageWarn, settings.tab === 'play' ? '' : $('audioWarn').textContent, settings.tab === 'measure' ? '' : $('micWarn').textContent].filter(Boolean).join(' ');
         if ($('notice').textContent !== notes) $('notice').textContent = notes;
         $('notice').hidden = !notes;
     }
@@ -1288,6 +1353,7 @@
     // Apply a settings change. A change that would need too many modes is undone.
     function change(mutate) {
         const before = Object.assign({}, settings);
+        keepPartialSweep();     // a running sweep is saved with the settings it was measured with, before they change
         mutate();
         sanitize(settings);
         // a complaint about the old settings is out of date now
@@ -1329,11 +1395,13 @@
     $('stop').addEventListener('click', stopAll);
     $('stripStop').addEventListener('click', stopAll);
     // a warning in the top bar goes away when tapped
-    $('notice').addEventListener('click', () => { $('audioWarn').textContent = ''; $('micWarn').textContent = ''; tabMarks(); });
+    $('notice').addEventListener('click', () => { $('audioWarn').textContent = ''; $('micWarn').textContent = ''; storageWarn = ''; tabMarks(); });
     $('sweep').addEventListener('click', toggleSweep);
     $('mic').addEventListener('click', toggleMic);
     $('clap').addEventListener('click', recordClap);
-    $('saveBtn').addEventListener('click', saveMeasurement);
+    try { $('saveNote').value = localStorage.getItem('pyramid-res-note') || ''; } catch (e) { /* no stored note */ }
+    $('saveNote').addEventListener('change', noteChanged);
+    $('openSaved').addEventListener('click', () => showTab('saved', true));
     $('photoInput').addEventListener('change', photoChosen);
     $('shareAll').addEventListener('click', () => send('all', async () => prepareAll(), $('shareAll'), 'Send all as one file'));
 
@@ -1365,7 +1433,7 @@
     setSessionType('playback');
     // Last of all, when everything it reads exists: an automatic reload must not cut off a sound,
     // a measurement in progress, or a finished measurement that has not been saved yet.
-    if (updater) updater.busy = () => !!(voice || micOn || clapBusy || curveState === 'done' || (!$('saveBox').hidden && $('saveNote').value.trim()));
+    if (updater) updater.busy = () => !!(voice || micOn || clapBusy || curveState === 'done');
     syncInputs();
     if (!recompute()) {
         // a stored range that is too large: fall back to the default range, keep the room

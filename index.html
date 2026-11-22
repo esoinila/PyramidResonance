@@ -89,6 +89,8 @@
         #tabs { flex: 1; min-width: 0; }
         #stripStop { flex: none; width: 48px; min-height: 44px; padding: 0; font-size: 1.1rem; }
         #notice { margin: 8px 0 0; min-height: 0; }
+        #recentList button { display: block; width: 100%; text-align: left; background: transparent; color: var(--text); border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 10px 2px; min-height: 44px; font-size: .9rem; font-weight: 400; font-variant-numeric: tabular-nums; }
+        #recentList button b { color: var(--gold); }
         #nowLevel { color: var(--gold); font-size: .9rem; min-height: 1.3em; font-variant-numeric: tabular-nums; }
 
         #now { text-align: center; padding: 8px 0 2px; }
@@ -140,7 +142,7 @@
                 <div id="tabs" role="tablist" aria-label="Sections">
                     <button role="tab" id="tabBtn-measure" data-tab="measure" aria-controls="tab-measure">Measure<span id="dotMeasure" hidden><span class="dot" aria-hidden="true"> ●</span><span class="sr"> (microphone or sweep on)</span></span></button>
                     <button role="tab" id="tabBtn-play" data-tab="play" aria-controls="tab-play">Play<span id="dotPlay" hidden><span class="dot" aria-hidden="true"> ♪</span><span class="sr"> (a tone is playing)</span></span></button>
-                    <button role="tab" id="tabBtn-saved" data-tab="saved" aria-controls="tab-saved">Saved</button>
+                    <button role="tab" id="tabBtn-saved" data-tab="saved" aria-controls="tab-saved">Saved<span id="savedCount"></span></button>
                     <button role="tab" id="tabBtn-setup" data-tab="setup" aria-controls="tab-setup">Setup</button>
                 </div>
                 <!-- Always in reach, on every tab. It is always there (greyed when silent), so nothing moves when a tone starts. -->
@@ -170,13 +172,16 @@
             <canvas id="chart" role="img" aria-label="Measured level against frequency with predicted room modes"></canvas>
             <p class="hint" id="chartHint">Run a sweep or record a clap with the microphone on. Gold line: measured level. Ticks along the top: the predicted modes of the room chosen in Setup (long ticks are axial).</p>
             <div id="peaks"></div>
-            <div id="saveBox" hidden>
-                <label class="mt">Place or note (optional)
+            <div id="saveBox">
+                <p class="hint" id="saveMsg" role="status">Every measurement is saved on this phone by itself the moment it finishes, a clap with its sound. Nothing needs to be tapped. They collect on the Saved tab at the top of the page, where you can send them.</p>
+                <div id="recentBox" hidden>
+                    <p class="hint" id="recentTitle" style="margin-bottom:4px"></p>
+                    <div id="recentList"></div>
+                </div>
+                <div class="row mt"><button id="openSaved" class="ghost" type="button">Open saved measurements</button></div>
+                <label class="mt">Place or note (optional; goes with every measurement until you change it)
                     <input type="text" id="saveNote" maxlength="120" autocomplete="off" placeholder="e.g. stairwell, 2nd floor">
                 </label>
-                <label class="mt check" id="keepAudioRow" hidden><input type="checkbox" id="keepAudio" checked><span>Keep the sound of the clap for later analysis (<span id="keepAudioSize"></span>)</span></label>
-                <div class="row mt"><button id="saveBtn">Save this measurement</button></div>
-                <p class="hint" id="saveMsg"></p>
             </div>
         </div>
 
@@ -246,7 +251,7 @@
         <div class="card">
             <h2>Saved measurements</h2>
             <div id="savedList"></div>
-            <p class="hint" id="savedEmpty">Nothing saved yet. After a clap or a measured sweep, "Save this measurement" stores the spectrum here with the time and your location. You can add a photo and send it by mail or to another app.</p>
+            <p class="hint" id="savedEmpty">Nothing saved yet. Every clap and every measured sweep is stored here by itself the moment it finishes, with the time, your location and, for a clap, its sound. You can add a photo and send it by mail or to another app.</p>
             <div class="row mt"><button id="shareAll" class="ghost" hidden>Send all as one file</button></div>
             <p class="hint">Saved on this phone only, until you send them. The location needs "Precise Location" allowed for this page. Photos are kept inside the app (reduced in size) and travel with the measurement when you send it; a web page cannot write to the phone's photo gallery itself.</p>
             <p class="warn" id="savedMsg"></p>
