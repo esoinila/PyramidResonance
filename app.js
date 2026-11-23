@@ -1124,7 +1124,8 @@
         if (text === String(was || '').trim()) return false;            // nothing was changed: nothing is touched
         const sess = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === key);
         if (!sess) return false;
-        const targets = new Set(sess.records.filter((r) => ids.has(r.id)));
+        let targets = new Set(sess.records.filter((r) => ids.has(r.id)));
+        if (!targets.size) targets = new Set(sess.records);       // the ones it stood for are gone: the note is the session's, so it goes to all that are left
         if (!targets.size) return false;
         const pid = placeIdFor(text, targets);      // the same name is the same place; a mere rename keeps the identity
         const writes = [];
@@ -1156,10 +1157,11 @@
         if (!d || typeof d.key !== 'string' || typeof d.text !== 'string') { forget(); return; }
         const ids = new Set(String(d.ids || '').split(' ').filter(Boolean));
         // compared with what the measurements carry now, so a note that did get written before the app closed is not applied again
-        const one = saved.find((r) => ids.has(r.id));
+        const want = d.text.trim().slice(0, 200);
+        const one = saved.find((r) => ids.has(r.id) && (r.sessionNote || '') !== want);      // one that the text has not reached yet
         if (!one || !applySessionNote(d.key, ids, one.sessionNote || '', d.text)) { forget(); return; }   // (applying it removes the draft once written)
         renderSaved();
-        savedMsg('A session note that was being typed when the app closed ("' + d.text.trim().slice(0, 60) + '") was applied.');
+        savedMsg(want ? 'A session note that was being typed when the app closed ("' + want.slice(0, 60) + '") was applied.' : 'A session note that was being cleared when the app closed was cleared.');
     }
     const uncommittedNotes = () => Array.from(document.querySelectorAll('#savedList .sessNote')).some((i) => i.value.trim().slice(0, 200) !== (i.dataset.was || ''));
     function commitSessionNotes(except) {
@@ -1170,6 +1172,10 @@
             if (applySessionNote(input.dataset.id, idsOf(input), was, input.value)) {
                 changed = true;
                 input.dataset.was = input.value.trim().slice(0, 200);
+                // it now also stands for measurements of its session that already carried the new note
+                { const sess = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === input.dataset.id), stood = idsOf(input);
+                    if (sess) sess.records.forEach((r) => { if (placeKey(r.sessionNote) === placeKey(input.dataset.was)) stood.add(r.id); });
+                    input.dataset.ids = Array.from(stood).join(' '); }
                 const card = input.closest('.session');
                 if (card && card.refreshInPlace) card.refreshInPlace(input.dataset.was);
             }
@@ -1234,7 +1240,13 @@
                 sNote.dataset.was = sess.note;
                 sNote.dataset.ids = sess.records.filter((r) => placeKey(r.sessionNote) === placeKey(sess.note) || !placeKey(r.sessionNote)).map((r) => r.id).join(' ');
                 // a field being typed in keeps its text and the measurements it stood for when the typing began
-                if (typing && typing.cls === 'sessNote' && typing.id === sess.key) { sNote.value = typing.value; sNote.dataset.was = typing.was; sNote.dataset.ids = typing.ids; }
+                if (typing && typing.cls === 'sessNote' && typing.id === sess.key) {
+                    sNote.value = typing.value; sNote.dataset.was = typing.was;
+                    // ... plus any that joined the session meanwhile carrying that same note (a clap that finished while typing)
+                    const stood = new Set(typing.ids.split(' ').filter(Boolean));
+                    sess.records.forEach((r) => { if (placeKey(r.sessionNote) === placeKey(typing.was) || !placeKey(r.sessionNote)) stood.add(r.id); });
+                    sNote.dataset.ids = Array.from(stood).join(' ');
+                }
                 // The lines that depend on the session note are redrawn where they stand. The list is not rebuilt here:
                 // the tap that ended the typing is often on a button of this very list, and must still find it.
                 card.refreshInPlace = (note) => {
@@ -1246,7 +1258,11 @@
                         const tag = box.querySelector('.placeTag');
                         const differs = placeKey(rec.sessionNote) && placeKey(rec.sessionNote) !== placeKey(note);
                         if (tag) { tag.textContent = differs ? ' · place: ' + rec.sessionNote : ''; }
+                        const one = box.querySelector('[data-role=share]');
+                        if (one && !prepared.has(rec.id)) one.textContent = 'Send';
                     });
+                    const all = card.querySelector('[data-role=shareSession]');
+                    if (all && !prepared.has('session:' + sess.key)) all.textContent = 'Send session as one zip';     // files built before this change are gone
                     describe();
                 };
                 const finish = () => {
@@ -1406,7 +1422,8 @@
     }
     async function autoSave(interrupted) {
         if (curveState !== 'done') return;
-        commitSessionNotes();       // a session note still in its field counts for this measurement
+        // a session note finished but not yet applied counts for this measurement; one still being typed is left to its typist
+        { const a = document.activeElement; commitSessionNotes(a && a.classList && a.classList.contains('sessNote') ? a : null); }
         const d = roomDims();
         const kind = curveKind;
         const id = kind === 'sweep' ? sweepId : null;       // the same id as its checkpoint, so a recovery can never duplicate it

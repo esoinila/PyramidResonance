@@ -834,6 +834,23 @@ async def main():
         await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
         check(await page.evaluate("document.querySelectorAll('#savedList .session').length") == 2 and await page.evaluate("document.querySelector('#savedList .session .sessNote').value") == 'Other place',
               'a measurement at a different place starts a new session')
+        # a clap that finishes while its session's note is being typed on the Saved tab ends up with the finished note, in the same session
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()")
+        await page.click('#savedList .session:first-child .sessNote')
+        await page.keyboard.press('End'); await page.keyboard.type(' ce', delay=60)
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 3", timeout=9000); await page.wait_for_timeout(500)
+        check(await page.evaluate("document.activeElement.classList.contains('sessNote') && document.activeElement.value") == 'Other place ce', 'a clap finishing while a session note is typed does not disturb the typing')
+        await page.keyboard.type('llar', delay=60); await page.keyboard.press('Tab'); await page.wait_for_timeout(900)
+        notes = await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll();
+            g.onsuccess = () => { q.result.close(); done(g.result.map(r => [r.sessionNote, r.sessionId, r.placeId])); }; }; })""")
+        cellar = [n for n in notes if n[0] == 'Other place cellar']
+        check(len(notes) == 3 and len(cellar) == 2 and cellar[0][1] == cellar[1][1] and cellar[0][2] == cellar[1][2] and await page.evaluate("document.querySelectorAll('#savedList .session').length") == 2
+              and await page.evaluate("saveNote.value") == 'Other place cellar', 'and that clap gets the finished note, in the same session and place as the others', notes)
         check(not errors, 'no page errors (no storage)', errors)
         await page.close()
 
