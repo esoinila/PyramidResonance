@@ -107,13 +107,13 @@
   }
 
   const slugOf = (text, max) => String(text || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, max);
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, max).replace(/-+$/, '');
 
   // File name stem shared by a record's data, chart, photo and sound, so they sort together.
   // The date and time come first and the whole stem is short, because a phone's file list
   // shows only the first twenty-odd characters: "2026-11-23_120106_clap".
   function fileBase(rec) {
-    const p = localParts(rec), slug = slugOf(rec.note, 30);
+    const p = localParts(rec), slug = slugOf(rec.note, 16);     // short: a long name pushes the time out of sight
     return p.date + '_' + p.compact + '_' + (rec.kind === 'sweep' ? 'sweep' : 'clap') + (slug ? '_' + slug : '');
   }
 

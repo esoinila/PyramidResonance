@@ -949,10 +949,16 @@
     // (audioPending keeps the sound's description, so that if the sound did reach storage after all it is found again at the next start)
     const dbCopy = (rec) => (unstored.has(rec) && memAudio.has(rec.id) ? Object.assign({}, rec, { audio: null, audioMissing: true, audioPending: rec.audio }) : rec);
     // Any change to a record after it was sent means the copy outside the phone is out of date
-    function touched(rec) { rec.sentAt = null; prepared.delete(rec.id); prepared.delete('all'); }
+    // Files built for a send that waits for its second tap are out of date as soon as anything changes:
+    // the record's own, the "everything" zip, and every session zip.
+    function forgetPrepared(rec) {
+        if (rec) prepared.delete(rec.id);
+        Array.from(prepared.keys()).forEach((k) => { if (k === 'all' || String(k).indexOf('session:') === 0) prepared.delete(k); });
+    }
+    function touched(rec) { rec.sentAt = null; forgetPrepared(rec); }
     // A record still held in memory is written whole by storeRecord, so a small update only needs to wait for that.
     const putRecord = (rec) => {
-        prepared.delete(rec.id); prepared.delete('all');
+        forgetPrepared(rec);
         if (deleted.has(rec.id)) return Promise.resolve();
         // being written right now, or waiting to be: storeRecord writes the whole record, and once more when it is done
         if (inFlight.has(rec) || (unstored.has(rec) && !memAudio.has(rec.id))) return Promise.resolve();
@@ -1015,6 +1021,7 @@
         if (rec.interrupted) out.push(['interrupted', 'bad']);
         if (rec.kind === 'clap' && !rec.audio) out.push(['NO SOUND', 'bad']);
         if (rec.disturbed) out.push(['volume changed during the sweep', 'bad']);
+        if (!rec.location && rec.locationStatus !== 'pending') out.push(['no location', 'todo']);
         out.push(rec.sentAt ? ['sent ' + whenShort(rec.sentAt), 'ok'] : ['not sent yet', 'todo']);
         return out;
     }
@@ -1039,18 +1046,28 @@
     // ---------- sessions and places ----------
     const SESSION_GAP_MIN = 30;
     // A measurement made within half an hour of the previous one continues that session; otherwise a new one starts
+    // ... and so does one made at a different place: a new place is a new session.
     function currentSessionId() {
         const newest = saved[0];
-        if (newest && newest.sessionId && Date.now() - new Date(newest.time).getTime() <= SESSION_GAP_MIN * 60000) return newest.sessionId;
+        if (newest && newest.sessionId && Date.now() - new Date(newest.time).getTime() <= SESSION_GAP_MIN * 60000 &&
+            placeKey(newest.sessionNote) === placeKey($('saveNote').value)) return newest.sessionId;
         return R.uuid();
     }
-    // A place keeps one identity under its name: the same name gives the same id, a new name a new id
+    // A place keeps one identity under its name: the same name gives the same id, a new name a new id.
+    // editing: the records whose note is being changed right now; they do not count as evidence for the new name.
     const placeKey = (name) => String(name || '').trim().toLowerCase();
-    function placeIdFor(name) {
+    const newPlaces = new Map();    // names first used in this run -> the id they were given, so every caller gets the same one
+    function placeIdFor(name, editing) {
         const key = placeKey(name);
         if (!key) return null;
-        const known = saved.find((r) => r.placeId && placeKey(r.sessionNote) === key);
-        return known ? known.placeId : R.uuid();
+        const skip = editing || new Set();
+        const known = saved.find((r) => !skip.has(r) && r.placeId && placeKey(r.sessionNote) === key);
+        if (known) return known.placeId;
+        // a place that is only being renamed (nothing else uses its id) keeps its identity
+        const own = Array.from(new Set(Array.from(skip).map((r) => r.placeId).filter(Boolean)));
+        if (own.length === 1 && !saved.some((r) => !skip.has(r) && r.placeId === own[0])) { newPlaces.set(key, own[0]); return own[0]; }
+        if (!newPlaces.has(key)) newPlaces.set(key, R.uuid());
+        return newPlaces.get(key);
     }
     // The places used before, newest first, offered as suggestions wherever a session note is typed
     function placeNames() {
@@ -1065,12 +1082,12 @@
         R.sessions(list.filter((r) => !r.sessionId), SESSION_GAP_MIN).forEach((sess) => {
             const sid = R.uuid();
             const notes = new Set(sess.records.map((r) => (r.note || '').trim()));
-            const common = notes.size === 1 ? Array.from(notes)[0] : '';
+            const common = notes.size === 1 && sess.records.length > 1 ? Array.from(notes)[0] : '';
             sess.records.forEach((r) => {
                 r.sessionId = sid;
                 if (!R.isUuid(r.uuid)) r.uuid = R.uuid();
                 if (r.sessionNote == null) r.sessionNote = '';
-                if (common && !r.sessionNote) { r.sessionNote = common; r.note = ''; }
+                if (common && !r.sessionNote) { r.sessionNote = common; r.note = ''; adoptOldRecords.moved = (adoptOldRecords.moved || 0) + 1; }
                 changed.push(r);
             });
         });
@@ -1092,6 +1109,7 @@
     }
     const dateFi = (p) => { const d = p.date.split('-'); return Number(d[2]) + '.' + Number(d[1]) + '.' + d[0]; };
     const openRecs = new Set();     // records whose extra lines (location, photo, buttons) are unfolded
+    let sessEdit = null;            // the session note being typed: { key, value, ids of the records it applies to }
     function renderSaved() {
         const host = $('savedList');
         // the list is rebuilt while a note may be being typed (a location arrives): keep the cursor where it was
@@ -1139,12 +1157,24 @@
             sNote.placeholder = 'Place or note for this whole session'; sNote.value = sess.note; sNote.dataset.id = sess.key;
             sNote.setAttribute('list', 'placeList');
             sNote.setAttribute('aria-label', 'Note for the session of ' + dateFi(sess.start) + ' ' + sess.start.time);
-            let shown = sess.note;
+            // Typing here changes the measurements that carried the session's note when the field was entered
+            // (and those with none). A measurement with a different note of its own was set on purpose: left alone.
+            // The set is fixed for the whole edit and survives the list being rebuilt meanwhile.
+            const edit = sessEdit && sessEdit.key === sess.key ? sessEdit : null;
+            if (edit) sNote.value = edit.value;
+            const begin = () => {
+                if (sessEdit && sessEdit.key === sess.key) return sessEdit;
+                const was = placeKey(sNote.value);
+                sessEdit = { key: sess.key, value: sNote.value, ids: new Set(sess.records.filter((r) => placeKey(r.sessionNote) === was || !placeKey(r.sessionNote)).map((r) => r.id)) };
+                return sessEdit;
+            };
             const applySession = (text, final) => {
+                const state = begin();
+                state.value = text;
+                const targets = new Set(sess.records.filter((r) => state.ids.has(r.id)));
                 // the place identity is decided once, when the typing is done: the same name is the same place
-                const pid = final ? placeIdFor(text) : undefined;
-                sess.records.forEach((r) => {
-                    if ((r.sessionNote || '') !== shown && (r.sessionNote || '') !== '' && (r.sessionNote || '') !== text) return;   // set differently on purpose: left alone
+                const pid = final ? placeIdFor(text, targets) : undefined;
+                targets.forEach((r) => {
                     const samePlace = pid === undefined || (r.placeId || null) === (pid || null);
                     if ((r.sessionNote || '') === text && samePlace) return;                       // nothing new for this one
                     r.sessionNote = text;
@@ -1154,16 +1184,19 @@
                     const write = () => { noteTimers.delete(r.id); putRecord(r).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.')); };
                     if (final) write(); else noteTimers.set(r.id, setTimeout(write, 400));
                 });
-                shown = text;
                 sess.note = text;
-                // the newest session is the one being measured: what is typed here also goes with its next measurements
-                if (groups[0] === sess) { $('saveNote').value = text; noteTyped(); }
-                if (final) refreshPlaces();
+                // a session still being measured: what is typed here also goes with its next measurements
+                if (groups[0] === sess && Date.now() - new Date(sess.records[0].time).getTime() <= SESSION_GAP_MIN * 60000) { $('saveNote').value = text; noteTyped(); }
+                if (final) { sessEdit = null; refreshPlaces(); }
                 describe();
                 summaries();
             };
+            sNote.addEventListener('focus', begin);
             sNote.addEventListener('input', () => applySession(sNote.value.slice(0, 200), false));
-            sNote.addEventListener('change', () => applySession(sNote.value.trim().slice(0, 200), true));
+            // 'change' does not always come (the field can be rebuilt under the cursor), so leaving the field finishes the edit too
+            const done = () => { if (sessEdit && sessEdit.key === sess.key) applySession(sNote.value.trim().slice(0, 200), true); };
+            sNote.addEventListener('change', done);
+            sNote.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== sNote && !(document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('sessNote') && document.activeElement.dataset.id === sess.key)) done(); }, 0));
             card.appendChild(sNote);
             const sRow = el('div', null, 'row mt');
             const sKey = 'session:' + sess.key;
@@ -1181,6 +1214,7 @@
                 head.appendChild(el('b', p.time + ':' + p.compact.slice(4)));
                 head.appendChild(document.createTextNode(' ' + (rec.kind === 'sweep' ? 'Sweep' : 'Clap') + ' ' + rec.fMin + '–' + rec.fMax + ' Hz · ' + R.peakSummary(rec, 4) +
                     (rec.audio ? ' · sound ' + rec.audio.durationS.toFixed(1) + ' s' : '')));
+                if (placeKey(rec.sessionNote) && placeKey(rec.sessionNote) !== placeKey(sess.note)) head.appendChild(el('span', ' · place: ' + rec.sessionNote, 'flag-todo'));
                 box.appendChild(head);
                 box.appendChild(flagLine(rec));
                 // one line per measurement for a note about just that one, written as it is typed
@@ -1327,7 +1361,7 @@
         saved.unshift(rec);
         unstored.add(rec);
         if (wav) memAudio.set(rec.id, wav);
-        prepared.delete('all');
+        forgetPrepared(rec);
         renderSaved();
         startLocate(rec);
         const ok = await storeRecord(rec);
@@ -1541,37 +1575,46 @@
     // A set of measurements as ONE zip file: a .json with all spectra and details, every sound, every photo.
     // list: oldest first. If the phone will not share a zip, the same files go out loose; if it
     // will not take that many, the spectra go alone and the page says so.
+    const canShareFiles = (files) => { try { return !!(navigator.share && navigator.canShare && navigator.canShare({ files })); } catch (e) { return false; } };
     async function prepareZip(list, base) {
-        const missing = [], whole = [], loose = [], inZip = [];
+        const missing = [], whole = [];
         const body = JSON.stringify(R.exportAll(list, BUILD), null, 1);
-        const json = new File([body], base + '.json', { type: 'application/json' });
-        loose.push(json);
-        inZip.push({ name: base + '.json', bytes: new TextEncoder().encode(body), time: new Date() });
+        // asked before anything big is built, so that only one copy of the sounds is ever held
+        let useZip = !navigator.share || canShareFiles([new File([new Uint8Array(22)], 'probe.zip', { type: 'application/zip' })]);
+        let parts = [{ name: base + '.json', type: 'application/json', bytes: new TextEncoder().encode(body), time: new Date() }];
         let sounds = 0, photos = 0;
         for (const rec of list) {
             const b = R.fileBase(rec), when = new Date(rec.time);
             let complete = true;
             if (rec.audio) {
                 const a = await blobOf('audio', rec);
-                if (a) { loose.push(new File([a], b + '.wav', { type: 'audio/wav' })); inZip.push({ name: b + '.wav', bytes: new Uint8Array(a), time: when }); sounds++; }
+                if (a) { parts.push({ name: b + '.wav', type: 'audio/wav', bytes: new Uint8Array(a), time: when }); sounds++; }
                 else { complete = false; missing.push('the sound of ' + recTitle(rec)); }
             }
             if (rec.photo) {
                 const p = await blobOf('photos', rec);
-                if (p) { loose.push(new File([p], b + '_photo.jpg', { type: 'image/jpeg' })); inZip.push({ name: b + '_photo.jpg', bytes: new Uint8Array(p), time: when }); photos++; }
+                if (p) { parts.push({ name: b + '_photo.jpg', type: 'image/jpeg', bytes: new Uint8Array(p), time: when }); photos++; }
                 else { complete = false; missing.push('the photo of ' + recTitle(rec)); }
             }
             if (complete) whole.push(rec);
         }
-        const text = list.length + ' resonance measurement' + (list.length === 1 ? '' : 's') + ' in one zip: a .json file with all spectra, ' + sounds + ' sound file' + (sounds === 1 ? '' : 's') + ' and ' + photos + ' photo' + (photos === 1 ? '' : 's') + '.';
-        const spectraOnly = { files: [json], recs: list.filter((r) => !r.audio && !r.photo),
-            note: 'This phone will not share that many files at once, so ONLY THE SPECTRA are in this send. THE SOUNDS AND PHOTOS ARE NOT: send those measurements one at a time (More, then Send).' };
-        const looseFiles = { files: loose, recs: whole, fallback: loose.length > 1 ? spectraOnly : null,
-            note: 'This phone will not share a zip file, so the ' + loose.length + ' files were offered loose instead.' };
-        let zip = null;
-        try { zip = new File([R.zipStore(inZip)], base + '.zip', { type: 'application/zip' }); } catch (e) { zip = null; }
-        const pack = zip ? { files: [zip], recs: whole, fallback: looseFiles } : looseFiles;
-        return Object.assign({ title: 'Resonance measurements', text, missing }, pack, zip ? {} : { note: null });
+        const count = list.length + ' resonance measurement' + (list.length === 1 ? '' : 's');
+        const holds = 'a .json file with all spectra, ' + sounds + ' sound file' + (sounds === 1 ? '' : 's') + ' and ' + photos + ' photo' + (photos === 1 ? '' : 's') + '.';
+        let whyNot = 'This phone will not share a zip file';
+        if (useZip) {
+            try {
+                const zip = new File([R.zipStore(parts)], base + '.zip', { type: 'application/zip' });
+                parts = null;       // the zip is the only copy kept from here on
+                return { files: [zip], title: 'Resonance measurements', text: count + ' in one zip: ' + holds, missing, recs: whole, fallback: null };
+            } catch (e) { useZip = false; whyNot = 'The zip file could not be built (' + (e && e.message ? e.message : 'unknown error') + ')'; }
+        }
+        const loose = parts.map((p) => new File([p.bytes], p.name, { type: p.type }));
+        parts = null;
+        const pack = { files: loose, title: 'Resonance measurements', text: count + ' as ' + loose.length + ' separate files: ' + holds, missing, recs: whole,
+            say: whyNot + ', so the ' + loose.length + ' files were offered loose instead.',
+            fallback: loose.length > 1 ? { files: [loose[0]], recs: list.filter((r) => !r.audio && !r.photo),
+                note: 'This phone will not share that many files at once, so ONLY THE SPECTRA are in this send. THE SOUNDS AND PHOTOS ARE NOT: send those measurements one at a time (More, then Send).' } : null };
+        return pack;
     }
     const prepareAll = () => prepareZip(saved.slice().reverse(), (() => { const g = R.sessions(saved, SESSION_GAP_MIN); const last = g[g.length - 1], first = g[0];
         return last.start.date + '_to_' + first.end.date + '_all_' + saved.length + '-measurements'; })());
@@ -1598,7 +1641,7 @@
         }
         const notes = [];
         if (pack.missing && pack.missing.length) notes.push('NOT INCLUDED, because the app could not find it in storage: ' + pack.missing.join(', ') + '.');
-        const canShare = (files) => { try { return !!(navigator.share && navigator.canShare && navigator.canShare({ files })); } catch (e) { return false; } };
+        const canShare = canShareFiles;
         const asText = (files) => files.map((f) => (f.type === 'application/json' ? new File([f], f.name + '.txt', { type: 'text/plain' }) : f));
         // the pack itself, then what it falls back to: the first one this phone will share is used, and the page says which
         let shareable = false;
@@ -1607,6 +1650,7 @@
             const files = canShare(option.files) ? option.files : (navigator.share && canShare(asText(option.files)) ? asText(option.files) : null);
             if (!files) continue;
             if (depth && option.note) notes.push(option.note);
+            if (!depth && option.say) notes.push(option.say);
             pack = Object.assign({}, pack, { files, recs: option.recs, fallback: null });
             shareable = true;
             break;
@@ -1655,7 +1699,7 @@
                 unstored.delete(rec); memAudio.delete(rec.id);
                 tabMarks();
                 saved = saved.filter((r) => r !== rec);
-                prepared.delete(rec.id); prepared.delete('all');
+                forgetPrepared(rec);
                 if (thumbs.has(rec.id)) { URL.revokeObjectURL(thumbs.get(rec.id)); thumbs.delete(rec.id); }
                 if (viewing === rec) { viewing = null; $('peaks').textContent = ''; drawChart(); }
                 renderSaved();
@@ -1679,7 +1723,12 @@
                 if (r.audioPending && sounds.has(r.id)) { r.audio = r.audioPending; r.audioMissing = false; delete r.audioPending; putRecord(r).catch(() => {}); }
             });
             saved = saved.concat(fromDisk).sort((a, b) => (a.time < b.time ? 1 : -1));
-            adoptOldRecords(saved).forEach((r) => { putRecord(r).catch(() => {}); });
+            const adopted = adoptOldRecords(saved);
+            adopted.forEach((r) => { putRecord(r).catch(() => {}); });
+            if (adoptOldRecords.moved) {
+                savedMsg('Measurements from before this version were grouped into sessions. Where every measurement of a session carried the same note, that note is now the session\'s note (' + adoptOldRecords.moved + ' measurements). Nothing was removed.');
+                adoptOldRecords.moved = 0;
+            }
             if (loadFailed) { loadFailed = false; storageWarn = ''; savedMsg(''); tabMarks(); }
         } catch (e) {
             dropDb();

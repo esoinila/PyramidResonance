@@ -290,7 +290,7 @@ test('local time and file names follow the place where it was measured', () => {
   const rec = Rec.makeRecord({ time: new Date('2027-03-10T03:04:05Z'), tzOffsetMin: -300, note: 'Sacsayhuamán, niche 3!' });
   assert.deepStrictEqual(Rec.localParts(rec), { date: '2027-03-09', time: '22:04', compact: '220405' });
   // date and time first, short enough for a phone's file list to show whole
-  assert.strictEqual(Rec.fileBase(rec), '2027-03-09_220405_clap_sacsayhuaman-niche-3');
+  assert.strictEqual(Rec.fileBase(rec), '2027-03-09_220405_clap_sacsayhuaman-nic');
   const plain = Rec.fileBase(Rec.makeRecord({ time: new Date('2027-03-10T03:04:05Z'), tzOffsetMin: 120, kind: 'sweep' }));
   assert.strictEqual(plain, '2027-03-10_050405_sweep');
   assert.ok(plain.length <= 24, 'a name without a note fits two short lines');

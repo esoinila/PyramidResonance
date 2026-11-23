@@ -486,7 +486,7 @@ async def main():
         await page.click('#savedList .rec:last-child [data-role=share]'); await page.wait_for_timeout(500)
         shares = await page.evaluate("window.__shares")
         names = [f['name'] for f in shares[0]['files']] if shares else []
-        check(len(shares) == 1 and len(names) == 4 and re.match(r'^\d{4}-\d\d-\d\d_\d{6}_clap_test-room-niche-3\.json$', names[0]) and names[1].endswith('_chart.png') and names[2].endswith('_photo.jpg')
+        check(len(shares) == 1 and len(names) == 4 and re.match(r'^\d{4}-\d\d-\d\d_\d{6}_clap_test-room-niche\.json$', names[0]) and names[1].endswith('_chart.png') and names[2].endswith('_photo.jpg')
               and names[3] == names[0][:-5] + '.wav', 'sending one measurement gives data, chart, photo and sound, named date first', names)
         wav = shares[0]['files'][3].get('wav') if len(names) == 4 else None
         rate = await page.evaluate("window.__ctx.sampleRate")
@@ -530,6 +530,17 @@ async def main():
         await page.click('#savedList .rec:first-child [data-role=share]'); await page.wait_for_timeout(700)
         check('NOT INCLUDED' in await page.evaluate("savedMsg.textContent") and 'the sound' in await page.evaluate("savedMsg.textContent")
               and 'not sent yet' in await page.evaluate("document.querySelector('#savedList .rec:first-child .flags').textContent"), 'a send that had to leave the sound out says so and does not count as sent', await page.evaluate("savedMsg.textContent"))
+        # a session zip waiting for its second tap is thrown away when a measurement in it changes
+        await page.evaluate("window.__SHARE_REFUSE_ONCE = true")
+        await page.click('[data-role=shareSession]')
+        await page.wait_for_function("document.querySelector('[data-role=shareSession]').textContent === 'Tap to send'", timeout=8000)
+        await page.fill('#savedList .rec:last-child .recNote', 'Test room, niche 3 edited'); await page.dispatch_event('#savedList .rec:last-child .recNote', 'change'); await page.wait_for_timeout(600)
+        await page.click('[data-role=shareSession]'); await page.wait_for_timeout(1200)
+        shares = await page.evaluate("window.__shares")
+        zf = shares[-1]['files'][0]
+        fresh = json.loads(zipfile.ZipFile(io.BytesIO(base64.b64decode(zf.get('b64', '')))).read(zf['name'][:-4] + '.json')) if zf.get('b64') else {'measurements': []}
+        check(any(m['note'] == 'Test room, niche 3 edited' for m in fresh['measurements']), 'a zip prepared before an edit is not sent afterwards: the one that goes out has the edit', [m['note'] for m in fresh['measurements']])
+        await page.fill('#savedList .rec:last-child .recNote', 'Test room, niche 3'); await page.dispatch_event('#savedList .rec:last-child .recNote', 'change'); await page.wait_for_timeout(600)
         # a phone that will not share a zip gets the same files loose, and the page says so
         await page.evaluate("navigator.canShare = (d) => !!(d && d.files && d.files.length && !d.files.some(f => f.type === 'application/zip'))")
         await page.click('[data-role=shareSession]'); await page.wait_for_timeout(900)
@@ -716,23 +727,46 @@ async def main():
                 room: { name: 'custom' }, location: null, locationStatus: 'unavailable', photo: null, audio: null, app: '2.4.0', sentAt: null });
             s.put(old('20261119170000000-aaaa', '2026-11-19T15:00:00.000Z', 'pyorakellari 3')); s.put(old('20261119170200000-bbbb', '2026-11-19T15:02:00.000Z', 'pyorakellari 3'));
             s.put(old('20261120090000000-cccc', '2026-11-20T07:00:00.000Z', 'door open')); s.put(old('20261120090100000-dddd', '2026-11-20T07:01:00.000Z', ''));
+            const sid = '11111111-2222-4333-8444-555555555555';
+            [['eeee', '00', 'Alpha'], ['ffff', '01', 'Alpha'], ['gggg', '02', 'Beta']].forEach(([id, min, place]) => s.put(Object.assign(old('202611211000' + min + '000-' + id, '2026-11-21T08:' + min + ':00.000Z', ''), { sessionId: sid, sessionNote: place })));
             t.oncomplete = () => { q.result.close(); done(); }; }; })""")
         await page.reload()
-        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 4", timeout=5000)
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 7", timeout=5000)
         await page.wait_for_timeout(800)
         got = await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll();
             g.onsuccess = () => { q.result.close(); done(g.result.map(r => [r.id.slice(-4), r.sessionId, r.sessionNote, r.note, r.uuid, r.placeId, r.curve.length])); }; }; })""")
         by = {g[0]: g for g in got}
-        check(len(got) == 4 and by['aaaa'][1] and by['aaaa'][1] == by['bbbb'][1] and by['cccc'][1] == by['dddd'][1] and by['aaaa'][1] != by['cccc'][1] and all(g[4] and g[6] == 2 for g in got),
+        check(len(got) == 7 and by['aaaa'][1] and by['aaaa'][1] == by['bbbb'][1] and by['cccc'][1] == by['dddd'][1] and by['aaaa'][1] != by['cccc'][1] and all(g[4] and g[6] == 2 for g in got),
               'older measurements are grouped into sessions by their pauses and given identifiers, data untouched', got)
         check(by['aaaa'][2] == 'pyorakellari 3' and by['aaaa'][3] == '' and by['aaaa'][5] and by['aaaa'][5] == by['bbbb'][5] and by['cccc'][2] == '' and by['cccc'][3] == 'door open' and by['dddd'][3] == '',
               'a note that a whole old session shared becomes its session note; differing notes stay with their measurements', got)
-        check(await page.evaluate("document.querySelectorAll('#savedList .session').length") == 2 and await page.evaluate("!shareAll.hidden")
-              and await page.evaluate("[...placeList.options].map(o => o.value).join()") == 'pyorakellari 3', 'two sessions are listed, with a button to send everything, and the old place is offered again')
+        check(await page.evaluate("document.querySelectorAll('#savedList .session').length") == 3 and await page.evaluate("!shareAll.hidden")
+              and await page.evaluate("[...placeList.options].map(o => o.value).sort().join()") == 'Alpha,Beta,pyorakellari 3' and 'Nothing was removed' in await page.evaluate("savedMsg.textContent"),
+              'the sessions are listed, with a button to send everything; old places are offered again and the page says what it regrouped', await page.evaluate("savedMsg.textContent"))
+        check('place: Beta' in await page.evaluate("document.querySelector('#savedList .session .recs').textContent") and 'no location' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent"),
+              'a measurement whose place differs from its session says so in its row, and a missing location shows without unfolding')
+        read = """new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll();
+            g.onsuccess = () => { q.result.close(); done(Object.fromEntries(g.result.map(r => [r.id.slice(-4), [r.sessionNote, r.placeId]]))); }; }; })"""
+        before = await page.evaluate(read)
+        # typed key by key, passing through "Beta" on the way: the Beta measurement must not be swept along
+        await page.click('#savedList .session:first-child .sessNote')
+        for _ in range(5): await page.keyboard.press('Backspace')
+        await page.keyboard.type('Beta', delay=40)
+        await page.evaluate("document.querySelector('#savedList [data-role=location]') && window.dispatchEvent(new Event('resize'))")
+        await page.keyboard.type('max', delay=40)
+        await page.keyboard.press('Tab'); await page.wait_for_timeout(900)
+        after = await page.evaluate(read)
+        check(after['eeee'][0] == 'Betamax' and after['ffff'][0] == 'Betamax' and after['gggg'] == before['gggg'], 'a session note typed letter by letter changes only the measurements that had the old note', after)
+        check(after['eeee'][1] == before['eeee'][1] and after['eeee'][1] == after['ffff'][1] and after['eeee'][1] != after['gggg'][1], 'a place that is renamed keeps its identifier', after)
+        # another session is given the name of an existing place: it becomes that place
+        last = '#savedList .session:last-child .sessNote'
+        await page.fill(last, 'Betamax'); await page.dispatch_event(last, 'change'); await page.wait_for_timeout(900)
+        after = await page.evaluate(read)
+        check(after['aaaa'][0] == 'Betamax' and after['aaaa'][1] == after['eeee'][1] and after['bbbb'][1] == after['eeee'][1], 'a session renamed to an existing place takes that place\'s identifier', after)
         await page.evaluate(SHARE_MOCK)
         await page.click('#shareAll'); await page.wait_for_timeout(700)
         sent = await page.evaluate("window.__shares")
-        check(len(sent) == 1 and sent[0]['files'][0]['name'] == '2026-11-19_to_2026-11-20_all_4-measurements.zip', '"Send everything" is one zip named by its dates', [f['name'] for f in sent[0]['files']] if sent else sent)
+        check(len(sent) == 1 and sent[0]['files'][0]['name'] == '2026-11-19_to_2026-11-21_all_7-measurements.zip' and len(zipfile.ZipFile(io.BytesIO(base64.b64decode(sent[0]['files'][0]['b64']))).namelist()) == 1, '"Send everything" is one zip named by its dates', [f['name'] for f in sent[0]['files']] if sent else sent)
         await page.set_viewport_size({'width': 390, 'height': 844})
         await page.click('#tabBtn-saved'); await page.wait_for_timeout(300)
         await page.screenshot(path='/tmp/saved-tab.png', full_page=True)
@@ -750,6 +784,16 @@ async def main():
         await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
         check('WITHOUT ITS SOUND' in await page.evaluate("saveMsg.textContent") and 'NO SOUND' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent")
               and 'NO SOUND' in await page.evaluate("recentList.children[0].textContent"), 'a clap saved without sound is marked NO SOUND under the chart and in both lists', await page.evaluate("saveMsg.textContent"))
+        # moving to another place starts a new session, even within minutes
+        await page.fill('#saveNote', 'Other place')
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        check(await page.evaluate("document.querySelectorAll('#savedList .session').length") == 2 and await page.evaluate("document.querySelector('#savedList .session .sessNote').value") == 'Other place',
+              'a measurement at a different place starts a new session')
         check(not errors, 'no page errors (no storage)', errors)
         await page.close()
 
