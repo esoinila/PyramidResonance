@@ -303,6 +303,13 @@
 
         <p class="hint">Model: rigid rectangular room. Real rooms have openings, sloped ceilings and people in them, so expect measured peaks within a few percent of the prediction, not on it. The curve also contains your speaker's and microphone's own response.</p>
         <div class="card">
+            <h2>Phone position</h2>
+            <p class="hint" id="motionLine" style="margin-top:0"></p>
+            <div class="row"><button id="motionAsk" class="ghost" type="button">Allow the motion sensor</button></div>
+            <p class="hint">The sensor reports about 60 times a second, enough to tell how the phone lies and whether it was moved. It cannot measure the vibration of a wall or floor at sound frequencies.</p>
+        </div>
+
+        <div class="card">
             <h2>Version</h2>
             <p class="hint" style="margin-top:0"><span id="build"></span><span id="released"></span></p>
             <div class="row mt"><button id="checkUpdate" class="ghost">Check for update</button></div>

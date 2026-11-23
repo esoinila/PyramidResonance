@@ -373,6 +373,7 @@
             abortSweep();
             keepPartialSweep();      // never start over the top of an unsaved one
             recording = micOn;
+            if (recording) motionBegin();
             if (recording) { rawAudio = null; curve = []; curveState = 'none'; viewing = null; curveKind = 'sweep'; disturbed = false; sweepId = null; checkpointAt = 0; $('peaks').textContent = ''; }
             lastReadF = 0;
             setActive(-1);
@@ -508,9 +509,103 @@
         return { samples, sampleRate: ctx.sampleRate };
     }
 
+    // ---------- Motion sensor ----------
+    // The phone's own motion sensor tells how the phone lay during a measurement and whether it was moved since
+    // the previous one. It is a note beside the measurement, never a condition for it: without the sensor, or
+    // without permission, measurements are made and saved exactly the same.
+    const motion = { status: 'off', listening: false, measuring: false, n: 0, g: [0, 0, 0], lin2: 0, rot2: 0, t0: 0, tLast: 0,
+        betweenMs: 0, duringMs: 0, heading: null, last: null, prev: null, seen: 0 };
+    const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    function onMotion(e) {
+        const a = e.accelerationIncludingGravity;
+        if (!a || a.x == null || a.y == null || a.z == null) return;
+        motion.seen++;
+        if (motion.status !== 'on') { motion.status = 'on'; motionLine(); }
+        const now = performance.now();
+        const dt = motion.tLast ? Math.min(100, now - motion.tLast) : 0;
+        motion.tLast = now;
+        // iPhones report the pull of gravity itself; other phones report the opposite (the push of the table)
+        const sign = IOS ? 1 : -1;
+        const g = [a.x * sign, a.y * sign, a.z * sign];
+        const l = e.acceleration, r = e.rotationRate;
+        const lin = l && l.x != null ? Math.hypot(l.x, l.y || 0, l.z || 0) : 0;                        // m/s² without gravity
+        const rot = r && r.alpha != null ? Math.hypot(r.alpha, r.beta || 0, r.gamma || 0) : 0;         // degrees per second
+        motion.last = g;
+        const moving = rot > 25 || lin > 1.2;       // clearly being handled, not just resting
+        if (motion.measuring) {
+            motion.n++;
+            motion.g[0] += g[0]; motion.g[1] += g[1]; motion.g[2] += g[2];
+            motion.lin2 += lin * lin; motion.rot2 += rot * rot;
+            if (moving) motion.duringMs += dt;
+        } else if (moving) motion.betweenMs += dt;
+    }
+    function onHeading(e) {
+        const h = typeof e.webkitCompassHeading === 'number' ? e.webkitCompassHeading : (e.absolute && typeof e.alpha === 'number' ? (360 - e.alpha) % 360 : null);
+        if (h != null && Number.isFinite(h)) motion.heading = h;
+    }
+    function motionLine() {
+        const text = { off: 'Motion sensor: not asked yet. It is asked for when the microphone is turned on.', asking: 'Motion sensor: waiting for your answer…',
+            on: 'Motion sensor: on. Each measurement notes how the phone lay and whether it was moved since the previous one.',
+            denied: 'Motion sensor: not allowed. Measurements are saved as usual, without the phone\'s position. To allow it, close the app completely, open it again and answer "Allow".',
+            none: 'Motion sensor: this device gives no motion data. Measurements are saved as usual, without the phone\'s position.' }[motion.status];
+        $('motionLine').textContent = text;
+        $('motionAsk').hidden = motion.status === 'on' || motion.status === 'none';
+    }
+    // Must be called straight from a tap: an iPhone only shows its permission question then.
+    function motionEnable() {
+        if (motion.listening || motion.status === 'asking') return;
+        const listen = () => {
+            if (motion.listening) return;
+            motion.listening = true;
+            window.addEventListener('devicemotion', onMotion);
+            window.addEventListener('deviceorientation', onHeading);
+            window.addEventListener('deviceorientationabsolute', onHeading);
+            // a device with no sensor never sends an event
+            setTimeout(() => { if (!motion.seen && motion.status !== 'denied' && motion.status !== 'asking') { motion.status = 'none'; motionLine(); } }, 3000);
+        };
+        try {
+            if (typeof DeviceMotionEvent === 'undefined') { motion.status = 'none'; motionLine(); return; }
+            if (typeof DeviceMotionEvent.requestPermission === 'function') {
+                motion.status = 'asking'; motionLine();
+                DeviceMotionEvent.requestPermission().then((answer) => {
+                    // listening costs nothing and is harmless when nothing comes; the first report that does come turns the status to "on"
+                    motion.status = answer === 'granted' ? 'off' : 'denied';
+                    listen();
+                    motionLine();
+                    // the compass has its own question on some versions; it is the same answer on most
+                    try { if (answer === 'granted' && typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') DeviceOrientationEvent.requestPermission().catch(() => {}); } catch (e) { /* ignore */ }
+                }, () => { motion.status = 'denied'; listen(); motionLine(); });
+            } else listen();
+        } catch (e) { motion.status = 'none'; motionLine(); }
+    }
+    function motionBegin() {
+        motion.measuring = true;
+        motion.n = 0; motion.g = [0, 0, 0]; motion.lin2 = 0; motion.rot2 = 0; motion.duringMs = 0;
+        motion.t0 = performance.now();
+    }
+    // The phone's position for the measurement just ended, or null without sensor data
+    function motionEnd() {
+        if (!motion.measuring) return null;
+        motion.measuring = false;
+        const n = motion.n;
+        // a very short measurement may have caught no report: the latest one is used then
+        const gravity = n ? motion.g.map((v) => v / n) : motion.last;
+        if (!gravity) return null;
+        const cur = { gravity };
+        const since = R.movedSince(motion.prev, cur, motion.betweenMs);
+        const secs = (performance.now() - motion.t0) / 1000;
+        const out = { gravity, headingDeg: motion.heading, movedSincePrevious: since.moved, angleFromPreviousDeg: since.angleDeg,
+            inMotionBeforeMs: motion.prev ? motion.betweenMs : null, inMotionDuringMs: motion.duringMs,
+            shakeRms: n ? Math.sqrt(motion.lin2 / n) : null, turnRms: n ? Math.sqrt(motion.rot2 / n) : null, samples: n, rateHz: n && secs > 0 ? n / secs : null };
+        motion.prev = cur;
+        motion.betweenMs = motion.duringMs;     // moving during this one counts as moved before the next
+        return out;
+    }
+
     async function toggleMic() {
         if (micBusy) return;
         if (micOn) { micOff(); return; }
+        motionEnable();         // first thing in the tap, before anything waits
         $('micWarn').textContent = '';
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             $('micWarn').textContent = 'No microphone access in this browser. It needs https and a recent browser.';
@@ -674,6 +769,7 @@
                     rawAudio = null; rawChunks = []; rawCount = 0;
                     if (tap) tap.start();
                     if (armClap) armClap();      // from here on an interruption saves instead of dropping
+                    motionBegin();
                 } else return;
             }
             if (now < startMs + 4000) {
@@ -1024,6 +1120,11 @@
         if (rec.interrupted) out.push(['interrupted', 'bad']);
         if (rec.kind === 'clap' && !rec.audio) out.push(['NO SOUND', 'bad']);
         if (rec.disturbed) out.push(['volume changed during the sweep', 'bad']);
+        if (rec.motion) {
+            if (rec.motion.inMotionDuringMs >= 300) out.push(['PHONE MOVED DURING IT', 'bad']);
+            if (rec.motion.movedSincePrevious === true) out.push(['phone moved', 'todo']);
+            else if (rec.motion.movedSincePrevious === false) out.push(['same position', 'ok']);
+        }
         if (!rec.location && rec.locationStatus !== 'pending') out.push(['no location', 'todo']);
         out.push(rec.sentAt ? ['sent ' + whenShort(rec.sentAt), 'ok'] : ['not sent yet', 'todo']);
         return out;
@@ -1341,6 +1442,12 @@
                     loc.dataset.role = 'location';
                     if (rec.location) { const a = el('a', 'map'); a.href = R.mapsUrl(rec.location); a.target = '_blank'; a.rel = 'noopener'; loc.appendChild(a); }
                     more.appendChild(loc);
+                    if (rec.motion) {
+                        const m = rec.motion;
+                        more.appendChild(el('p', 'Phone: ' + m.pose + (m.headingDeg != null ? ', top pointing to ' + m.headingDeg + '°' : '') +
+                            (m.angleFromPreviousDeg != null ? ', tilted ' + m.angleFromPreviousDeg + '° from the previous measurement' : '') +
+                            (m.inMotionBeforeMs ? ', in motion for ' + (m.inMotionBeforeMs / 1000).toFixed(1) + ' s before it' : '') + '.', 'hint'));
+                    }
                     if (rec.photo) {
                         const img = document.createElement('img');
                         img.alt = 'Photo for this measurement';
@@ -1434,7 +1541,7 @@
             tempC: settings.temp, fMin: settings.fMin, fMax: settings.fMax,
             sweepDurS: settings.sweepDur, speaker: settings.speaker,
             curve, peaks: lastPeaks, app: BUILD, locationStatus: 'pending',
-            interrupted: !!interrupted, disturbed: kind === 'sweep' && disturbed,
+            interrupted: !!interrupted, disturbed: kind === 'sweep' && disturbed, motion: motionEnd(),
         });
         // the sound of a clap is always kept: it is what later analysis needs
         let wav = null;
@@ -1457,12 +1564,14 @@
         const p = (n) => String(n).padStart(2, '0'), t = new Date(rec.time);
         const at = p(t.getHours()) + ':' + p(t.getMinutes()) + ':' + p(t.getSeconds());
         const what = (interrupted ? 'The interrupted ' + kind + ' was saved as far as it got, at ' : 'Saved by itself at ') + at;
+        const m = rec.motion;
+        const where = !m ? '' : m.inMotionDuringMs >= 300 ? ' The phone MOVED DURING this measurement.' : m.movedSincePrevious === true ? ' The phone was moved since the previous one.' : m.movedSincePrevious === false ? ' Same phone position as the previous one.' : '';
         if (!ok) {
             saveNote('NOT STORED on the phone (' + storeError + '). The measurement of ' + at + ' is in the Saved list, held only while the app stays open: send it from there now. The app keeps trying to store it.', true);
         } else if (kind === 'clap' && !rec.audio) {
-            saveNote(what + ', but WITHOUT ITS SOUND: the phone gave the app no raw sound for this clap. The spectrum and peaks are saved. Turn the microphone off and on before the next clap. It is number ' + saved.length + ' on the Saved tab.', true);
+            saveNote(what + ', but WITHOUT ITS SOUND: the phone gave the app no raw sound for this clap. The spectrum and peaks are saved. Turn the microphone off and on before the next clap.' + where + ' It is number ' + saved.length + ' on the Saved tab.', true);
         } else {
-            saveNote(what + (rec.audio ? ', with the sound of the clap' : '') + '. It is number ' + saved.length + ' on the Saved tab (top of the page): open it there to add a photo or send it.');
+            saveNote(what + (rec.audio ? ', with the sound of the clap' : '') + '.' + where + ' It is number ' + saved.length + ' on the Saved tab (top of the page): open it there to add a photo or send it.');
         }
         // ask the phone not to clear this data when it runs low on space, and say what it answered
         askPersist();
@@ -2035,6 +2144,8 @@
     showTab(settings.tab);
     setInterval(tabMarks, 400);
 
+    motionLine();
+    $('motionAsk').addEventListener('click', motionEnable);
     $('build').textContent = 'Version ' + BUILD;
     $('released').textContent = ', published ' + formatWhen(RELEASED);
     $('checkUpdate').addEventListener('click', checkUpdate);

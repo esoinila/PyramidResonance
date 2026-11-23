@@ -92,6 +92,7 @@
       disturbed: !!input.disturbed,       // the volume was changed during a sweep
       audioMissing: !!input.audioMissing, // a clap whose sound could not be recorded or stored
       sentAt: null,                       // ISO time of the last successful Send, else null: no copy outside the phone yet
+      motion: cleanMotion(input.motion),  // how the phone lay and whether it had moved, from its motion sensor; null if not available
       app: String(input.app || ''),
     };
   }
@@ -115,6 +116,57 @@
   function fileBase(rec) {
     const p = localParts(rec), slug = slugOf(rec.note, 16);     // short: a long name pushes the time out of sight
     return p.date + '_' + p.compact + '_' + (rec.kind === 'sweep' ? 'sweep' : 'clap') + (slug ? '_' + slug : '');
+  }
+
+  // ---------- the phone's position, from its motion sensor ----------
+  const mnum = (x, digits) => (typeof x === "number" && Number.isFinite(x) ? Number(x.toFixed(digits == null ? 2 : digits)) : null);
+  // Angle in degrees between two 3-vectors; null if either has no length
+  function angleDeg(a, b) {
+    if (!a || !b) return null;
+    const la = Math.hypot(a[0], a[1], a[2]), lb = Math.hypot(b[0], b[1], b[2]);
+    if (!(la > 0) || !(lb > 0)) return null;
+    const c = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb);
+    return Math.acos(Math.max(-1, Math.min(1, c))) * 180 / Math.PI;
+  }
+  // How a phone lies, in words, from the direction of gravity in its own axes
+  // (x to the right of the screen, y to its top, z out of the screen towards the viewer; g points down).
+  function poseName(g) {
+    if (!g) return 'unknown';
+    const n = Math.hypot(g[0], g[1], g[2]);
+    if (!(n > 0)) return 'unknown';
+    const x = g[0] / n, y = g[1] / n, z = g[2] / n;
+    if (z < -0.94) return 'flat, screen up';
+    if (z > 0.94) return 'flat, screen down';
+    if (y < -0.94) return 'upright';
+    if (y > 0.94) return 'upside down';
+    if (x > 0.94) return 'on its left edge';
+    if (x < -0.94) return 'on its right edge';
+    const tilt = Math.round(Math.acos(Math.max(-1, Math.min(1, -z))) * 180 / Math.PI);
+    return 'tilted ' + tilt + '° from flat';
+  }
+  // Has the phone been moved between two measurements? prev, cur: { gravity: [x, y, z] } of each;
+  // betweenMs: for how long in total it was clearly in motion in between (a tap on the screen is only a blink).
+  // Returns { moved, angleDeg }. A phone turned about the vertical keeps its gravity direction, so the time in motion counts too.
+  const MOVED_ANGLE_DEG = 4, MOVED_MS = 500;
+  function movedSince(prev, cur, betweenMs) {
+    if (!prev || !cur || !prev.gravity || !cur.gravity) return { moved: null, angleDeg: null };
+    const a = angleDeg(prev.gravity, cur.gravity);
+    return { moved: (a != null && a > MOVED_ANGLE_DEG) || betweenMs >= MOVED_MS, angleDeg: a == null ? null : mnum(a, 1) };
+  }
+  function cleanMotion(m) {
+    if (!m || !Array.isArray(m.gravity) || m.gravity.length !== 3 || !m.gravity.every((v) => typeof v === 'number' && Number.isFinite(v))) return null;
+    return {
+      gravity: m.gravity.map((v) => mnum(v, 3)),                 // m/s², direction of "down" in the phone's axes, averaged over the measurement
+      pose: poseName(m.gravity),
+      headingDeg: mnum(m.headingDeg, 0),                         // compass direction the top of the phone points to, if the phone gave one
+      movedSincePrevious: m.movedSincePrevious === true ? true : m.movedSincePrevious === false ? false : null,
+      angleFromPreviousDeg: mnum(m.angleFromPreviousDeg, 1),
+      inMotionBeforeMs: mnum(m.inMotionBeforeMs, 0),             // time clearly in motion since the previous measurement
+      inMotionDuringMs: mnum(m.inMotionDuringMs, 0),             // ... and during this one
+      shakeRms: mnum(m.shakeRms, 3),                             // m/s², acceleration without gravity, during the measurement
+      turnRms: mnum(m.turnRms, 2),                               // degrees per second, during the measurement
+      samples: mnum(m.samples, 0), rateHz: mnum(m.rateHz, 0),
+    };
   }
 
   // A random RFC 4122 version 4 identifier
@@ -302,5 +354,5 @@
     return { type: 'audio/wav', format: 'float32', sampleRate: rate, channels: 1, samples: sampleCount, durationS: round(sampleCount / rate, 3) };
   }
 
-  return { SCHEMA, encodeWav, audioInfo, cleanLocation, betterFix, makeRecord, localParts, fileBase, formatLocation, mapsUrl, peakSummary, shareText, exportAll, fitSize, sessions, zipStore, crc32, uuid, isUuid };
+  return { SCHEMA, encodeWav, audioInfo, cleanLocation, betterFix, makeRecord, localParts, fileBase, formatLocation, mapsUrl, peakSummary, shareText, exportAll, fitSize, sessions, zipStore, crc32, uuid, isUuid, angleDeg, poseName, movedSince, cleanMotion };
 });
