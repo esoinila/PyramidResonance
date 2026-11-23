@@ -139,21 +139,26 @@
     if (z > 0.94) return 'flat, screen down';
     if (y < -0.94) return 'upright';
     if (y > 0.94) return 'upside down';
-    if (x > 0.94) return 'on its left edge';
-    if (x < -0.94) return 'on its right edge';
+    // gravity points to the edge the phone rests on
+    if (x < -0.94) return 'on its left edge';
+    if (x > 0.94) return 'on its right edge';
     const tilt = Math.round(Math.acos(Math.max(-1, Math.min(1, -z))) * 180 / Math.PI);
     return 'tilted ' + tilt + '° from flat';
   }
   // Has the phone been moved between two measurements? prev, cur: { gravity: [x, y, z] } of each;
-  // betweenMs: for how long in total it was clearly in motion in between (a tap on the screen is only a blink).
+  // betweenMs: the longest unbroken stretch for which it was clearly in motion in between (a tap on the screen is only a blink).
   // Returns { moved, angleDeg }. A phone turned about the vertical keeps its gravity direction, so the time in motion counts too.
   const MOVED_ANGLE_DEG = 4, MOVED_MS = 500;
   function movedSince(prev, cur, betweenMs) {
     if (!prev || !cur || !prev.gravity || !cur.gravity) return { moved: null, angleDeg: null };
     const a = angleDeg(prev.gravity, cur.gravity);
-    return { moved: (a != null && a > MOVED_ANGLE_DEG) || betweenMs >= MOVED_MS, angleDeg: a == null ? null : mnum(a, 1) };
+    return { moved: (a != null && a > MOVED_ANGLE_DEG) || (Number(betweenMs) || 0) >= MOVED_MS, angleDeg: a == null ? null : mnum(a, 1) };
   }
   function cleanMotion(m) {
+    // this is a note beside a measurement: whatever is wrong with it, it must never stop the measurement being saved
+    try { return cleanMotionUnsafe(m); } catch (e) { return null; }
+  }
+  function cleanMotionUnsafe(m) {
     if (!m || !Array.isArray(m.gravity) || m.gravity.length !== 3 || !m.gravity.every((v) => typeof v === 'number' && Number.isFinite(v))) return null;
     return {
       gravity: m.gravity.map((v) => mnum(v, 3)),                 // m/s², direction of "down" in the phone's axes, averaged over the measurement
@@ -161,7 +166,7 @@
       headingDeg: mnum(m.headingDeg, 0),                         // compass direction the top of the phone points to, if the phone gave one
       movedSincePrevious: m.movedSincePrevious === true ? true : m.movedSincePrevious === false ? false : null,
       angleFromPreviousDeg: mnum(m.angleFromPreviousDeg, 1),
-      inMotionBeforeMs: mnum(m.inMotionBeforeMs, 0),             // time clearly in motion since the previous measurement
+      inMotionBeforeMs: mnum(m.inMotionBeforeMs, 0),             // longest unbroken stretch clearly in motion since the previous measurement
       inMotionDuringMs: mnum(m.inMotionDuringMs, 0),             // ... and during this one
       shakeRms: mnum(m.shakeRms, 3),                             // m/s², acceleration without gravity, during the measurement
       turnRms: mnum(m.turnRms, 2),                               // degrees per second, during the measurement

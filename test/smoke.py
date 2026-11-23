@@ -853,13 +853,14 @@ async def main():
               and await page.evaluate("saveNote.value") == 'Other place cellar', 'and that clap gets the finished note, in the same session and place as the others', notes)
 
         # ---- the motion sensor: how the phone lay, and whether it was moved since the previous measurement
-        check(re.search(r'Motion sensor: (this device gives no motion data|not allowed)', await page.evaluate("motionLine.textContent")) is not None and 'saved as usual' in await page.evaluate("motionLine.textContent") and await page.evaluate("document.querySelector('#savedList .rec').textContent.includes('Phone:')") is False,
-              'without a motion sensor the page says so and measurements are saved as before', await page.evaluate("motionLine.textContent"))
+        check('not being noted' in await page.evaluate("motionLine.textContent") and await page.evaluate("!motionAsk2.hidden && motionAsk2.closest('.tab').id") == 'tab-measure' and await page.evaluate("document.querySelector('#savedList .rec').textContent.includes('Phone:')") is False,
+              'the motion sensor is never asked for by itself: a button beside the microphone offers it, and measurements are saved as before without it', await page.evaluate("motionLine.textContent"))
+        await page.click('#motionAsk2')
         # a phone lying flat that reports 50 times a second
         await page.evaluate("""(() => { window.__g = [0, 0, 9.81]; window.__rot = 0;
             window.__sensor = setInterval(() => window.dispatchEvent(new DeviceMotionEvent('devicemotion', { accelerationIncludingGravity: { x: window.__g[0], y: window.__g[1], z: window.__g[2] },
                 acceleration: { x: 0, y: 0, z: 0 }, rotationRate: { alpha: window.__rot, beta: 0, gamma: 0 }, interval: 20 })), 20); })()""")
-        await page.wait_for_function("motionLine.textContent.startsWith('Motion sensor: on')", timeout=4000)
+        await page.wait_for_function("motionLine.textContent.startsWith('Phone position: on') && motionAsk2.hidden", timeout=4000)
         n0 = await page.evaluate("document.querySelectorAll('#savedList .rec').length")
         await page.click('#clap')
         waited = 0
@@ -869,7 +870,7 @@ async def main():
         await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
         last = "(() => { const q = indexedDB.open('pyramid-res'); return new Promise((done) => { q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll(); g.onsuccess = () => { q.result.close(); done(g.result.sort((a, b) => a.time < b.time ? 1 : -1)[0].motion); }; }; }); })()"
         m1 = await page.evaluate(last)
-        check(m1 and m1['pose'] == 'flat, screen up' and m1['movedSincePrevious'] is None and m1['samples'] > 100 and 40 < m1['rateHz'] < 60 and m1['inMotionDuringMs'] == 0,
+        check(m1 and m1['pose'] == 'flat, screen up' and m1['movedSincePrevious'] is None and m1['samples'] > 100 and 25 < m1['rateHz'] < 70 and m1['inMotionDuringMs'] == 0,
               'a measurement notes how the phone lay (first one: nothing to compare with)', m1)
         await page.click('#clap')
         waited = 0
@@ -891,6 +892,17 @@ async def main():
         m3 = await page.evaluate(last)
         check(m3 and m3['movedSincePrevious'] is True and m3['pose'] == 'upright' and 85 < m3['angleFromPreviousDeg'] < 95 and 'phone moved' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent")
               and 'was moved since the previous one' in await page.evaluate("saveMsg.textContent"), 'after the phone is repositioned the measurement is marked "phone moved"', m3)
+        # a few taps on the screen (short bursts) do not count as moving the phone
+        for _ in range(4):
+            await page.evaluate("window.__rot = 120"); await page.wait_for_timeout(150); await page.evaluate("window.__rot = 0"); await page.wait_for_timeout(200)
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        mt = await page.evaluate(last)
+        check(mt and mt['movedSincePrevious'] is False and 0 < mt['inMotionBeforeMs'] < 500, 'several short bursts of motion (taps) are not a move', mt)
         # picked up, turned about and put back exactly as it was
         await page.evaluate("window.__rot = 120"); await page.wait_for_timeout(900); await page.evaluate("window.__rot = 0")
         await page.click('#clap')
@@ -914,7 +926,17 @@ async def main():
         check(m5 and m5['inMotionDuringMs'] >= 300 and 'PHONE MOVED DURING IT' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent"), 'a phone moved during the measurement is flagged in red', m5)
         await page.click('#savedList .rec:first-child [data-role=more]')
         check('Phone: upright' in await page.evaluate("document.querySelector('#savedList .rec:first-child .more').textContent"), 'the phone position is spelled out under "More"')
-        check(await page.evaluate("document.querySelectorAll('#savedList .rec').length") == n0 + 5, '(test setup) five measurements were added')
+        check(await page.evaluate("document.querySelectorAll('#savedList .rec').length") == n0 + 6, '(test setup) six measurements were added')
+        # whatever goes wrong inside the motion code, the measurement is still saved
+        await page.evaluate("(() => { Records.movedSince = () => { throw new Error('motion code broke'); }; })()")
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        check(await page.evaluate("document.querySelectorAll('#savedList .rec').length") == n0 + 7 and await page.evaluate(last) is None and 'Saved by itself' in await page.evaluate("saveMsg.textContent"),
+              'a failure inside the motion code does not stop the measurement being saved', await page.evaluate("saveMsg.textContent"))
         await page.evaluate("clearInterval(window.__sensor)")
         check(not errors, 'no page errors (no storage)', errors)
         await page.close()

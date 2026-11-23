@@ -273,6 +273,7 @@
     function say(text) { $('say').textContent = text; }
 
     function setButtons() {
+        try { motionLine(); } catch (e) { /* the phone-position extra is not ready yet, or missing */ }
         const sweeping = !!(voice && voice.kind === 'sweep');
         $('stop').disabled = !voice;
         $('sweep').textContent = sweeping ? 'Stop sweep' : 'Start sweep';
@@ -373,7 +374,7 @@
             abortSweep();
             keepPartialSweep();      // never start over the top of an unsaved one
             recording = micOn;
-            if (recording) motionBegin();
+            if (recording) { try { motionBegin(1000); } catch (e) { /* an extra */ } }
             if (recording) { rawAudio = null; curve = []; curveState = 'none'; viewing = null; curveKind = 'sweep'; disturbed = false; sweepId = null; checkpointAt = 0; $('peaks').textContent = ''; }
             lastReadF = 0;
             setActive(-1);
@@ -513,8 +514,8 @@
     // The phone's own motion sensor tells how the phone lay during a measurement and whether it was moved since
     // the previous one. It is a note beside the measurement, never a condition for it: without the sensor, or
     // without permission, measurements are made and saved exactly the same.
-    const motion = { status: 'off', listening: false, measuring: false, n: 0, g: [0, 0, 0], lin2: 0, rot2: 0, t0: 0, tLast: 0,
-        betweenMs: 0, duringMs: 0, heading: null, last: null, prev: null, seen: 0 };
+    const motion = { status: 'off', listening: false, measuring: false, n: 0, g: [0, 0, 0], lin2: 0, rot2: 0, t0: 0, tLast: 0, skipUntil: 0,
+        run: 0, betweenMs: 0, duringMs: 0, heading: null, last: null, prev: null, prevPlace: null, seen: 0 };
     const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     function onMotion(e) {
         const a = e.accelerationIncludingGravity;
@@ -522,6 +523,9 @@
         motion.seen++;
         if (motion.status !== 'on') { motion.status = 'on'; motionLine(); }
         const now = performance.now();
+        // a gap in the reports (phone locked, app in the background) hides whatever happened meanwhile:
+        // nothing can then be said about "the same position as before"
+        if (motion.tLast && now - motion.tLast > 1000) { motion.prev = null; motion.run = 0; }
         const dt = motion.tLast ? Math.min(100, now - motion.tLast) : 0;
         motion.tLast = now;
         // iPhones report the pull of gravity itself; other phones report the opposite (the push of the table)
@@ -532,24 +536,32 @@
         const rot = r && r.alpha != null ? Math.hypot(r.alpha, r.beta || 0, r.gamma || 0) : 0;         // degrees per second
         motion.last = g;
         const moving = rot > 25 || lin > 1.2;       // clearly being handled, not just resting
+        // what counts is the longest unbroken stretch of motion: taps on the screen are many short ones
+        motion.run = moving ? motion.run + dt : 0;
         if (motion.measuring) {
             motion.n++;
             motion.g[0] += g[0]; motion.g[1] += g[1]; motion.g[2] += g[2];
             motion.lin2 += lin * lin; motion.rot2 += rot * rot;
-            if (moving) motion.duringMs += dt;
-        } else if (moving) motion.betweenMs += dt;
+            if (now >= motion.skipUntil && motion.run > motion.duringMs) motion.duringMs = motion.run;
+        } else if (motion.run > motion.betweenMs) motion.betweenMs = motion.run;
     }
     function onHeading(e) {
         const h = typeof e.webkitCompassHeading === 'number' ? e.webkitCompassHeading : (e.absolute && typeof e.alpha === 'number' ? (360 - e.alpha) % 360 : null);
         if (h != null && Number.isFinite(h)) motion.heading = h;
     }
     function motionLine() {
-        const text = { off: 'Motion sensor: not asked yet. It is asked for when the microphone is turned on.', asking: 'Motion sensor: waiting for your answer…',
-            on: 'Motion sensor: on. Each measurement notes how the phone lay and whether it was moved since the previous one.',
-            denied: 'Motion sensor: not allowed. Measurements are saved as usual, without the phone\'s position. To allow it, close the app completely, open it again and answer "Allow".',
-            none: 'Motion sensor: this device gives no motion data. Measurements are saved as usual, without the phone\'s position.' }[motion.status];
-        $('motionLine').textContent = text;
-        $('motionAsk').hidden = motion.status === 'on' || motion.status === 'none';
+        const text = { off: 'Phone position: not being noted. Tap the button to let the app use the motion sensor.', asking: 'Phone position: waiting for your answer…',
+            on: 'Phone position: on. Each measurement notes how the phone lay and whether it was moved since the previous one.',
+            denied: 'Phone position: the motion sensor is not allowed. Measurements are saved as usual, without it. To allow it, close the app completely, open it again and answer "Allow".',
+            none: 'Phone position: this device gives no motion data. Measurements are saved as usual, without it.' }[motion.status];
+        // (an older copy of the page may lack these lines: the sensor is an extra and must never stop anything else)
+        const line = document.getElementById('motionLine'), line2 = document.getElementById('motionLine2');
+        const ask = document.getElementById('motionAsk'), ask2 = document.getElementById('motionAsk2');
+        if (line) line.textContent = text;
+        if (line2) line2.textContent = motion.status === 'on' ? '' : text;
+        const done = motion.status === 'on' || motion.status === 'none' || motion.status === 'asking';
+        if (ask) ask.hidden = done;
+        if (ask2) ask2.hidden = done || !micOn;     // offered beside the microphone once that is on, never in the same tap
     }
     // Must be called straight from a tap: an iPhone only shows its permission question then.
     function motionEnable() {
@@ -578,15 +590,20 @@
             } else listen();
         } catch (e) { motion.status = 'none'; motionLine(); }
     }
-    function motionBegin() {
+    // skipMs: the start of a sweep is a tap on the screen, which must not count as moving during it
+    function motionBegin(skipMs) {
+        if (motion.measuring && motion.duringMs > motion.betweenMs) motion.betweenMs = motion.duringMs;    // one that ended without being saved
         motion.measuring = true;
+        motion.skipUntil = performance.now() + (skipMs || 0);
         motion.n = 0; motion.g = [0, 0, 0]; motion.lin2 = 0; motion.rot2 = 0; motion.duringMs = 0;
         motion.t0 = performance.now();
     }
     // The phone's position for the measurement just ended, or null without sensor data
-    function motionEnd() {
+    function motionEnd(place) {
         if (!motion.measuring) return null;
         motion.measuring = false;
+        if (motion.prevPlace !== place) motion.prev = null;      // another place: there is no "previous position" to compare with
+        motion.prevPlace = place;
         const n = motion.n;
         // a very short measurement may have caught no report: the latest one is used then
         const gravity = n ? motion.g.map((v) => v / n) : motion.last;
@@ -605,7 +622,6 @@
     async function toggleMic() {
         if (micBusy) return;
         if (micOn) { micOff(); return; }
-        motionEnable();         // first thing in the tap, before anything waits
         $('micWarn').textContent = '';
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             $('micWarn').textContent = 'No microphone access in this browser. It needs https and a recent browser.';
@@ -769,7 +785,7 @@
                     rawAudio = null; rawChunks = []; rawCount = 0;
                     if (tap) tap.start();
                     if (armClap) armClap();      // from here on an interruption saves instead of dropping
-                    motionBegin();
+                    try { motionBegin(0); } catch (e) { /* an extra */ }
                 } else return;
             }
             if (now < startMs + 4000) {
@@ -1445,8 +1461,8 @@
                     if (rec.motion) {
                         const m = rec.motion;
                         more.appendChild(el('p', 'Phone: ' + m.pose + (m.headingDeg != null ? ', top pointing to ' + m.headingDeg + '°' : '') +
-                            (m.angleFromPreviousDeg != null ? ', tilted ' + m.angleFromPreviousDeg + '° from the previous measurement' : '') +
-                            (m.inMotionBeforeMs ? ', in motion for ' + (m.inMotionBeforeMs / 1000).toFixed(1) + ' s before it' : '') + '.', 'hint'));
+                            (m.angleFromPreviousDeg != null ? ', leaning ' + m.angleFromPreviousDeg + '° differently than in the previous measurement' : '') +
+                            (m.inMotionBeforeMs ? ', handled for ' + (m.inMotionBeforeMs / 1000).toFixed(1) + ' s before it' : '') + '.', 'hint'));
                     }
                     if (rec.photo) {
                         const img = document.createElement('img');
@@ -1533,6 +1549,9 @@
         { const a = document.activeElement; commitSessionNotes(a && a.classList && a.classList.contains('sessNote') ? a : null); }
         const d = roomDims();
         const kind = curveKind;
+        // the phone's position is a note beside the measurement: nothing about it may stop the save
+        let phone = null;
+        try { phone = motionEnd(placeKey($('saveNote').value)); } catch (e) { phone = null; }
         const id = kind === 'sweep' ? sweepId : null;       // the same id as its checkpoint, so a recovery can never duplicate it
         if (kind === 'sweep') sweepId = null;
         const rec = R.makeRecord({
@@ -1541,7 +1560,7 @@
             tempC: settings.temp, fMin: settings.fMin, fMax: settings.fMax,
             sweepDurS: settings.sweepDur, speaker: settings.speaker,
             curve, peaks: lastPeaks, app: BUILD, locationStatus: 'pending',
-            interrupted: !!interrupted, disturbed: kind === 'sweep' && disturbed, motion: motionEnd(),
+            interrupted: !!interrupted, disturbed: kind === 'sweep' && disturbed, motion: phone,
         });
         // the sound of a clap is always kept: it is what later analysis needs
         let wav = null;
@@ -2144,8 +2163,12 @@
     showTab(settings.tab);
     setInterval(tabMarks, 400);
 
-    motionLine();
-    $('motionAsk').addEventListener('click', motionEnable);
+    // the phone-position extra is wired last of the optional things and can never stop the start-up
+    try {
+        motionLine();
+        ['motionAsk', 'motionAsk2'].forEach((id) => { const b = document.getElementById(id); if (b) b.addEventListener('click', motionEnable); });
+        document.addEventListener('visibilitychange', () => { if (document.hidden) { motion.prev = null; motion.run = 0; } });
+    } catch (e) { /* ignore */ }
     $('build').textContent = 'Version ' + BUILD;
     $('released').textContent = ', published ' + formatWhen(RELEASED);
     $('checkUpdate').addEventListener('click', checkUpdate);

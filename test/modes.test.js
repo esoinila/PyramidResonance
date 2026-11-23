@@ -439,7 +439,10 @@ test('the phone position: pose names, angles and "moved since the previous measu
   assert.strictEqual(R.poseName([0, 0, 9.81]), 'flat, screen down');
   assert.strictEqual(R.poseName([0, -9.81, 0]), 'upright');
   assert.strictEqual(R.poseName([0, 9.81, 0]), 'upside down');
-  assert.strictEqual(R.poseName([9.81, 0, 0]), 'on its left edge');
+  assert.strictEqual(R.poseName([-9.81, 0, 0]), 'on its left edge', 'gravity points to the edge the phone rests on');
+  assert.strictEqual(R.poseName([9.81, 0, 0]), 'on its right edge');
+  assert.strictEqual(R.movedSince({ gravity: [0, 0, -9.81] }, { gravity: [0, 0, -9.81] }, NaN).moved, false);
+  assert.strictEqual(R.makeRecord({ kind: 'clap', motion: { gravity: [0, 0, -9.8], get headingDeg() { throw new Error('boom'); } } }).motion, null, 'a broken motion note never stops a record being made');
   assert.strictEqual(R.poseName([0, -6.94, -6.94]), 'tilted 45° from flat');
   assert.strictEqual(R.poseName([0, 0, 0]), 'unknown');
   assert.strictEqual(R.poseName(null), 'unknown');
