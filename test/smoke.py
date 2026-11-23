@@ -727,20 +727,21 @@ async def main():
                 room: { name: 'custom' }, location: null, locationStatus: 'unavailable', photo: null, audio: null, app: '2.4.0', sentAt: null });
             s.put(old('20261119170000000-aaaa', '2026-11-19T15:00:00.000Z', 'pyorakellari 3')); s.put(old('20261119170200000-bbbb', '2026-11-19T15:02:00.000Z', 'pyorakellari 3'));
             s.put(old('20261120090000000-cccc', '2026-11-20T07:00:00.000Z', 'door open')); s.put(old('20261120090100000-dddd', '2026-11-20T07:01:00.000Z', ''));
+            s.put(old('20261118120000000-hhhh', '2026-11-18T10:00:00.000Z', ''));
             const sid = '11111111-2222-4333-8444-555555555555';
             [['eeee', '00', 'Alpha'], ['ffff', '01', 'Alpha'], ['gggg', '02', 'Beta']].forEach(([id, min, place]) => s.put(Object.assign(old('202611211000' + min + '000-' + id, '2026-11-21T08:' + min + ':00.000Z', ''), { sessionId: sid, sessionNote: place })));
             t.oncomplete = () => { q.result.close(); done(); }; }; })""")
         await page.reload()
-        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 7", timeout=5000)
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 8", timeout=5000)
         await page.wait_for_timeout(800)
         got = await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll();
             g.onsuccess = () => { q.result.close(); done(g.result.map(r => [r.id.slice(-4), r.sessionId, r.sessionNote, r.note, r.uuid, r.placeId, r.curve.length])); }; }; })""")
         by = {g[0]: g for g in got}
-        check(len(got) == 7 and by['aaaa'][1] and by['aaaa'][1] == by['bbbb'][1] and by['cccc'][1] == by['dddd'][1] and by['aaaa'][1] != by['cccc'][1] and all(g[4] and g[6] == 2 for g in got),
+        check(len(got) == 8 and by['aaaa'][1] and by['aaaa'][1] == by['bbbb'][1] and by['cccc'][1] == by['dddd'][1] and by['aaaa'][1] != by['cccc'][1] and all(g[4] and g[6] == 2 for g in got),
               'older measurements are grouped into sessions by their pauses and given identifiers, data untouched', got)
         check(by['aaaa'][2] == 'pyorakellari 3' and by['aaaa'][3] == '' and by['aaaa'][5] and by['aaaa'][5] == by['bbbb'][5] and by['cccc'][2] == '' and by['cccc'][3] == 'door open' and by['dddd'][3] == '',
               'a note that a whole old session shared becomes its session note; differing notes stay with their measurements', got)
-        check(await page.evaluate("document.querySelectorAll('#savedList .session').length") == 3 and await page.evaluate("!shareAll.hidden")
+        check(await page.evaluate("document.querySelectorAll('#savedList .session').length") == 4 and await page.evaluate("!shareAll.hidden")
               and await page.evaluate("[...placeList.options].map(o => o.value).sort().join()") == 'Alpha,Beta,pyorakellari 3' and 'Nothing was removed' in await page.evaluate("savedMsg.textContent"),
               'the sessions are listed, with a button to send everything; old places are offered again and the page says what it regrouped', await page.evaluate("savedMsg.textContent"))
         check('place: Beta' in await page.evaluate("document.querySelector('#savedList .session .recs').textContent") and 'no location' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent"),
@@ -754,8 +755,9 @@ async def main():
         await page.click('#savedList .session:first-child .sessNote')
         for _ in range(5): await page.keyboard.press('Backspace')
         await page.keyboard.type('Beta', delay=40)
-        await page.evaluate("document.querySelector('#savedList .session:last-child [data-role=share]').click()")      # a send elsewhere rebuilds the list when it is done
-        await page.wait_for_function("window.__shares.length === 1", timeout=8000); await page.wait_for_timeout(500)
+        # another measurement is deleted meanwhile, which rebuilds the whole list under the cursor
+        await page.evaluate("(() => { const b = document.querySelector('#savedList .session:last-child [data-role=delete]'); b.click(); b.click(); })()")
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 7", timeout=8000); await page.wait_for_timeout(500)
         check(await page.evaluate("document.activeElement.classList.contains('sessNote') && document.activeElement.value") == 'Beta' and (await page.evaluate(read))['eeee'][0] == 'Alpha',
               'a session note being typed survives the list being rebuilt, and is not written half way', await page.evaluate("document.activeElement.className + ' ' + document.activeElement.value"))
         await page.keyboard.type('max', delay=40)
@@ -782,7 +784,26 @@ async def main():
         await page.fill(last, 'Betamax2'); await page.dispatch_event(last, 'change'); await page.wait_for_timeout(900)
         after = await page.evaluate(read)
         check(after['aaaa'][0] == 'Betamax2' and after['aaaa'][1] == after['eeee'][1] and after['bbbb'][1] == after['eeee'][1], 'a session renamed to an existing place takes that place\'s identifier', after)
-        await page.evaluate("window.__shares = []")
+        # the tap that ends typing a session note must still work: here it lands on a "More" button of the same list
+        first = '#savedList .session:first-child .sessNote'
+        await page.click(first)
+        await page.keyboard.type('!', delay=40)
+        await page.mouse.click(*[(b['x'] + b['width'] / 2, b['y'] + b['height'] / 2) for b in [await page.locator('#savedList .session:first-child .rec:first-child [data-role=more]').bounding_box()]][0])
+        await page.wait_for_timeout(600)
+        after = await page.evaluate(read)
+        check(await page.evaluate("!document.querySelector('#savedList .session:first-child .rec:first-child .more').hidden") and after['eeee'][0] == 'Betamax2!' and after['aaaa'][0] == 'Betamax2',
+              'the tap that ends typing a session note is not swallowed, and the note is stored', after)
+        # typed and never left, and the app is closed with no warning: the text is applied at the next start
+        await page.click(first)
+        await page.keyboard.type('?', delay=40)
+        draft = await page.evaluate("localStorage.getItem('pyramid-res-session-note-draft')")
+        check('Betamax2!?' in (draft or ''), '(test setup) what is being typed is noted down at once', draft)
+        await page.evaluate("['visibilitychange', 'pagehide', 'beforeunload', 'freeze', 'blur', 'change'].forEach(n => { document.addEventListener(n, e => e.stopImmediatePropagation(), true); window.addEventListener(n, e => e.stopImmediatePropagation(), true); })")
+        await page.reload()
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 7", timeout=5000); await page.wait_for_timeout(900)
+        after = await page.evaluate(read)
+        check(after['eeee'][0] == 'Betamax2!?' and after['gggg'] == before['gggg'] and 'was applied' in await page.evaluate("savedMsg.textContent"), 'a session note being typed when the app is closed is applied at the next start, and the page says so', [after['eeee'], await page.evaluate("savedMsg.textContent + ' | draft: ' + localStorage.getItem('pyramid-res-session-note-draft')")])
+        await page.evaluate(SHARE_MOCK)
         await page.click('#shareAll'); await page.wait_for_timeout(700)
         sent = await page.evaluate("window.__shares")
         check(len(sent) == 1 and sent[0]['files'][0]['name'] == '2026-11-19_to_2026-11-21_all_7-measurements.zip' and len(zipfile.ZipFile(io.BytesIO(base64.b64decode(sent[0]['files'][0]['b64']))).namelist()) == 1, '"Send everything" is one zip named by its dates', [f['name'] for f in sent[0]['files']] if sent else sent)

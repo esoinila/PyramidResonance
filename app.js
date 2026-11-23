@@ -1114,39 +1114,67 @@
         places.textContent = '';
         placeNames().forEach((n) => { const o = document.createElement('option'); o.value = n; places.appendChild(o); });
     }
-    // A session note is applied when its field is left (or Enter is pressed), in one step:
-    // was = the note the field showed when it was drawn. The measurements that carried that note, and those
-    // with none, get the new text; a measurement with a different note of its own was set on purpose and is left alone.
-    function applySessionNote(key, was, text) {
+    // A session note is applied when its field is left (or Enter is pressed), in one step.
+    // ids: the measurements the field stands for, fixed when the field was drawn: those that carried the session's
+    // note then, and those with none. A measurement with a different note of its own was set on purpose and is
+    // never in that set, whatever is typed later. was: the text the field last stood for.
+    const DRAFT = 'pyramid-res-session-note-draft';
+    function applySessionNote(key, ids, was, text) {
         text = String(text || '').trim().slice(0, 200);
         if (text === String(was || '').trim()) return false;            // nothing was changed: nothing is touched
         const sess = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === key);
         if (!sess) return false;
-        const old = placeKey(was);
-        const targets = new Set(sess.records.filter((r) => placeKey(r.sessionNote) === old || !placeKey(r.sessionNote)));
+        const targets = new Set(sess.records.filter((r) => ids.has(r.id)));
+        if (!targets.size) return false;
         const pid = placeIdFor(text, targets);      // the same name is the same place; a mere rename keeps the identity
+        const writes = [];
         targets.forEach((r) => {
             if ((r.sessionNote || '') === text && (r.placeId || null) === (pid || null)) return;
             r.sessionNote = text;
             r.placeId = pid || null;
             touched(r);
-            putRecord(r).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.'));
+            writes.push(putRecord(r));
         });
+        // the copy noted down while typing is thrown away only when every measurement has really been written
+        Promise.all(writes).then(() => {
+            try { const d = JSON.parse(localStorage.getItem(DRAFT) || 'null'); if (d && d.key === key && String(d.text || '').trim().slice(0, 200) === text) localStorage.removeItem(DRAFT); } catch (e) { /* ignore */ }
+        }, (e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.'));
         // The session being measured right now: its note also goes with the next measurements,
         // unless something else has been typed under the chart for them meanwhile.
         const live = saved[0] && sess.records[0] === saved[0] && Date.now() - new Date(saved[0].time).getTime() <= SESSION_GAP_MIN * 60000;
-        if (live && placeKey($('saveNote').value) === old) { $('saveNote').value = text; noteTyped(); }
+        if (live && placeKey($('saveNote').value) === placeKey(was)) { $('saveNote').value = text; noteTyped(); }
         return true;
     }
-    // Finishes every session note that has been typed but not applied yet. Called before anything that
-    // depends on the notes: a rebuild of the list, a send, a new measurement, leaving the tab or the app.
+    const idsOf = (input) => new Set(String(input.dataset.ids || '').split(' ').filter(Boolean));
+    function saveDraft(input) { try { localStorage.setItem(DRAFT, JSON.stringify({ key: input.dataset.id, ids: input.dataset.ids || '', was: input.dataset.was || '', text: input.value })); } catch (e) { /* ignore */ } }
+    function dropDraft(key) { try { const d = JSON.parse(localStorage.getItem(DRAFT) || 'null'); if (!d || d.key === key) localStorage.removeItem(DRAFT); } catch (e) { /* ignore */ } }
+    // A session note that was being typed when the app was closed is applied at the next start
+    function recoverDraft() {
+        const forget = () => { try { localStorage.removeItem(DRAFT); } catch (e) { /* ignore */ } };
+        let d = null;
+        try { d = JSON.parse(localStorage.getItem(DRAFT) || 'null'); } catch (e) { d = null; }
+        if (!d || typeof d.key !== 'string' || typeof d.text !== 'string') { forget(); return; }
+        const ids = new Set(String(d.ids || '').split(' ').filter(Boolean));
+        // compared with what the measurements carry now, so a note that did get written before the app closed is not applied again
+        const one = saved.find((r) => ids.has(r.id));
+        if (!one || !applySessionNote(d.key, ids, one.sessionNote || '', d.text)) { forget(); return; }   // (applying it removes the draft once written)
+        renderSaved();
+        savedMsg('A session note that was being typed when the app closed ("' + d.text.trim().slice(0, 60) + '") was applied.');
+    }
+    const uncommittedNotes = () => Array.from(document.querySelectorAll('#savedList .sessNote')).some((i) => i.value.trim().slice(0, 200) !== (i.dataset.was || ''));
     function commitSessionNotes(except) {
         let changed = false;
         document.querySelectorAll('#savedList .sessNote').forEach((input) => {
             if (input === except) return;
             const was = input.dataset.was || '';
-            if (applySessionNote(input.dataset.id, was, input.value)) { changed = true; input.dataset.was = input.value.trim().slice(0, 200); }
+            if (applySessionNote(input.dataset.id, idsOf(input), was, input.value)) {
+                changed = true;
+                input.dataset.was = input.value.trim().slice(0, 200);
+                const card = input.closest('.session');
+                if (card && card.refreshInPlace) card.refreshInPlace(input.dataset.was);
+            }
         });
+        if (changed) { refreshPlaces(); summaries(); }
         return changed;
     }
     const dateFi = (p) => { const d = p.date.split('-'); return Number(d[2]) + '.' + Number(d[1]) + '.' + d[0]; };
@@ -1157,148 +1185,167 @@
         // the list is rebuilt while a note may be being typed (a location arrives): keep the cursor where it was
         const active = document.activeElement;
         const typing = active && active.classList && (active.classList.contains('recNote') || active.classList.contains('sessNote'))
-            ? { cls: active.classList.contains('recNote') ? 'recNote' : 'sessNote', id: active.dataset.id, at: active.selectionStart, value: active.value, was: active.dataset.was || '' } : null;
+            ? { cls: active.classList.contains('recNote') ? 'recNote' : 'sessNote', id: active.dataset.id, at: active.selectionStart, value: active.value, was: active.dataset.was || '', ids: active.dataset.ids || '' } : null;
         // session notes typed but not yet applied are applied now, except the one still being typed, which is carried over as it is
         commitSessionNotes(typing && typing.cls === 'sessNote' ? active : null);
         rebuilding = true;      // fields removed from the page fire 'change' and 'blur' in some browsers: those are not the user's
-        host.textContent = '';
-        $('savedEmpty').hidden = saved.length > 0;
-        summaries();
-        // the newest few are also listed right under the chart, so each new measurement is seen to arrive
-        $('recentBox').hidden = saved.length === 0;
-        $('recentList').textContent = '';
-        saved.slice(0, 5).forEach((rec) => {
-            const b = document.createElement('button'), t = document.createElement('b');
-            b.type = 'button';
-            t.textContent = R.localParts(rec).time + ':' + R.localParts(rec).compact.slice(4);
-            b.appendChild(t);
-            b.appendChild(document.createTextNode(' ' + rec.kind + (rec.audio ? ' + sound' : '') + ' · ' + R.peakSummary(rec, 3) + (rec.note ? ' · ' + rec.note : '')));
-            const bad = flags(rec).filter((f) => f[1] === 'bad').map((f) => f[0]);
-            if (bad.length) { const w = document.createElement('span'); w.className = 'flag-bad'; w.textContent = ' · ' + bad.join(' · '); b.appendChild(w); }
-            b.addEventListener('click', () => showRecord(rec));
-            $('recentList').appendChild(b);
-        });
-        const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
-        const groups = R.sessions(saved, SESSION_GAP_MIN);
-        $('shareAll').hidden = groups.length < 2;
-        refreshPlaces();
-        groups.forEach((sess) => {
-            const card = el('div', null, 'session');
-            card.dataset.key = sess.key;
-            const info = el('p', null, 'hint sessInfo');
-            const describe = () => {
-                const n = sess.records.length, sounds = sess.records.filter((r) => r.audio).length, unsent = sess.records.filter((r) => !r.sentAt).length;
-                const bad = {};
-                sess.records.forEach((r) => flags(r).forEach((f) => { if (f[1] === 'bad') bad[f[0]] = (bad[f[0]] || 0) + 1; }));
-                info.textContent = n + (n === 1 ? ' measurement' : ' measurements') + (sounds ? ', ' + sounds + ' with sound' : '') + ' · ' + (unsent ? unsent + ' not sent yet' : 'all sent');
-                Object.keys(bad).forEach((k) => { const w = el('span', ' · ' + bad[k] + ' × ' + k, 'flag-bad'); info.appendChild(w); });
-            };
-            card.appendChild(el('b', dateFi(sess.start) + ' ' + sess.start.time + (sess.end.time !== sess.start.time ? '–' + sess.end.time : ''), 'sessTitle'));
-            describe();
-            card.appendChild(info);
-            // one note for the whole session; it does not replace a different note that single measurements already carry
-            const sNote = document.createElement('input');
-            sNote.type = 'text'; sNote.className = 'sessNote'; sNote.maxLength = 200; sNote.autocomplete = 'off';
-            sNote.placeholder = 'Place or note for this whole session'; sNote.value = sess.note; sNote.dataset.id = sess.key;
-            sNote.setAttribute('list', 'placeList');
-            sNote.setAttribute('aria-label', 'Note for the session of ' + dateFi(sess.start) + ' ' + sess.start.time);
-            sNote.dataset.was = sess.note;
-            if (typing && typing.cls === 'sessNote' && typing.id === sess.key) { sNote.value = typing.value; sNote.dataset.was = typing.was; }
-            const finish = () => {
-                if (rebuilding || !sNote.isConnected) return;
-                if (commitSessionNotes()) renderSaved();
-            };
-            sNote.addEventListener('change', finish);
-            // 'change' does not always come on a phone, so leaving the field finishes the edit too
-            sNote.addEventListener('blur', () => setTimeout(finish, 0));
-            card.appendChild(sNote);
-            const sRow = el('div', null, 'row mt');
-            const sKey = 'session:' + sess.key;
-            const sendB = el('button', prepared.has(sKey) ? 'Tap to send' : 'Send session as one zip', 'ghost');
-            sendB.type = 'button'; sendB.dataset.role = 'shareSession';
-            sendB.addEventListener('click', () => {
-                commitSessionNotes();       // a note typed a moment ago belongs in what is sent
-                // the session as it is now, not as it was when this button was drawn
-                send(sKey, () => { const now = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === sess.key) || sess; return prepareZip(now.records.slice().reverse(), now.fileBase); }, sendB, 'Send session as one zip');
+        try {
+            host.textContent = '';
+            $('savedEmpty').hidden = saved.length > 0;
+            summaries();
+            // the newest few are also listed right under the chart, so each new measurement is seen to arrive
+            $('recentBox').hidden = saved.length === 0;
+            $('recentList').textContent = '';
+            saved.slice(0, 5).forEach((rec) => {
+                const b = document.createElement('button'), t = document.createElement('b');
+                b.type = 'button';
+                t.textContent = R.localParts(rec).time + ':' + R.localParts(rec).compact.slice(4);
+                b.appendChild(t);
+                b.appendChild(document.createTextNode(' ' + rec.kind + (rec.audio ? ' + sound' : '') + ' · ' + R.peakSummary(rec, 3) + (rec.note ? ' · ' + rec.note : '')));
+                const bad = flags(rec).filter((f) => f[1] === 'bad').map((f) => f[0]);
+                if (bad.length) { const w = document.createElement('span'); w.className = 'flag-bad'; w.textContent = ' · ' + bad.join(' · '); b.appendChild(w); }
+                b.addEventListener('click', () => showRecord(rec));
+                $('recentList').appendChild(b);
             });
-            sRow.appendChild(sendB);
-            card.appendChild(sRow);
-            const list = el('div', null, 'recs');
-            sess.records.forEach((rec) => {
-                const box = el('div', null, 'rec');
-                box.dataset.id = rec.id;
-                const p = R.localParts(rec);
-                const head = el('p', null, 'recHead');
-                head.appendChild(el('b', p.time + ':' + p.compact.slice(4)));
-                head.appendChild(document.createTextNode(' ' + (rec.kind === 'sweep' ? 'Sweep' : 'Clap') + ' ' + rec.fMin + '–' + rec.fMax + ' Hz · ' + R.peakSummary(rec, 4) +
-                    (rec.audio ? ' · sound ' + rec.audio.durationS.toFixed(1) + ' s' : '')));
-                if (placeKey(rec.sessionNote) && placeKey(rec.sessionNote) !== placeKey(sess.note)) head.appendChild(el('span', ' · place: ' + rec.sessionNote, 'flag-todo'));
-                box.appendChild(head);
-                box.appendChild(flagLine(rec));
-                // one line per measurement for a note about just that one, written as it is typed
-                const line = el('div', null, 'noteLine');
-                const note = document.createElement('input');
-                note.type = 'text'; note.className = 'recNote'; note.maxLength = 200; note.autocomplete = 'off';
-                note.placeholder = 'Note for this one (optional)'; note.value = rec.note || ''; note.dataset.id = rec.id;
-                note.setAttribute('aria-label', 'Note for the measurement of ' + p.time + ':' + p.compact.slice(4));
-                const writeNote = () => { noteTimers.delete(rec.id); putRecord(rec).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.')); };
-                // only this record's own lines are refreshed: rebuilding the list here would swallow the tap that ended the typing
-                const marks = () => { const old = box.querySelector('.flags'); if (old) old.replaceWith(flagLine(rec)); describe(); summaries(); };
-                note.addEventListener('input', () => {
-                    rec.note = note.value.slice(0, 200);
-                    touched(rec);
-                    marks();
-                    clearTimeout(noteTimers.get(rec.id));
-                    noteTimers.set(rec.id, setTimeout(writeNote, 400));
+            const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
+            const groups = R.sessions(saved, SESSION_GAP_MIN);
+            $('shareAll').hidden = groups.length < 2;
+            refreshPlaces();
+            groups.forEach((sess) => {
+                const card = el('div', null, 'session');
+                card.dataset.key = sess.key;
+                const info = el('p', null, 'hint sessInfo');
+                const describe = () => {
+                    const n = sess.records.length, sounds = sess.records.filter((r) => r.audio).length, unsent = sess.records.filter((r) => !r.sentAt).length;
+                    const bad = {};
+                    sess.records.forEach((r) => flags(r).forEach((f) => { if (f[1] === 'bad') bad[f[0]] = (bad[f[0]] || 0) + 1; }));
+                    info.textContent = n + (n === 1 ? ' measurement' : ' measurements') + (sounds ? ', ' + sounds + ' with sound' : '') + ' · ' + (unsent ? unsent + ' not sent yet' : 'all sent');
+                    Object.keys(bad).forEach((k) => { const w = el('span', ' · ' + bad[k] + ' × ' + k, 'flag-bad'); info.appendChild(w); });
+                };
+                card.appendChild(el('b', dateFi(sess.start) + ' ' + sess.start.time + (sess.end.time !== sess.start.time ? '–' + sess.end.time : ''), 'sessTitle'));
+                describe();
+                card.appendChild(info);
+                // one note for the whole session; it does not replace a different note that single measurements already carry
+                const sNote = document.createElement('input');
+                sNote.type = 'text'; sNote.className = 'sessNote'; sNote.maxLength = 200; sNote.autocomplete = 'off';
+                sNote.placeholder = 'Place or note for this whole session'; sNote.value = sess.note; sNote.dataset.id = sess.key;
+                sNote.setAttribute('list', 'placeList');
+                sNote.setAttribute('aria-label', 'Note for the session of ' + dateFi(sess.start) + ' ' + sess.start.time);
+                sNote.dataset.was = sess.note;
+                sNote.dataset.ids = sess.records.filter((r) => placeKey(r.sessionNote) === placeKey(sess.note) || !placeKey(r.sessionNote)).map((r) => r.id).join(' ');
+                // a field being typed in keeps its text and the measurements it stood for when the typing began
+                if (typing && typing.cls === 'sessNote' && typing.id === sess.key) { sNote.value = typing.value; sNote.dataset.was = typing.was; sNote.dataset.ids = typing.ids; }
+                // The lines that depend on the session note are redrawn where they stand. The list is not rebuilt here:
+                // the tap that ended the typing is often on a button of this very list, and must still find it.
+                card.refreshInPlace = (note) => {
+                    sess.note = note;
+                    card.querySelectorAll('.rec').forEach((box) => {
+                        const rec = sess.records.find((r) => r.id === box.dataset.id);
+                        if (!rec) return;
+                        const old = box.querySelector('.flags'); if (old) old.replaceWith(flagLine(rec));
+                        const tag = box.querySelector('.placeTag');
+                        const differs = placeKey(rec.sessionNote) && placeKey(rec.sessionNote) !== placeKey(note);
+                        if (tag) { tag.textContent = differs ? ' · place: ' + rec.sessionNote : ''; }
+                    });
+                    describe();
+                };
+                const finish = () => {
+                    if (rebuilding || !sNote.isConnected) return;
+                    commitSessionNotes();
+                };
+                // what is being typed is also noted down at once, so that it survives the app being closed before the field is left
+                sNote.addEventListener('input', () => { if (sNote.value.trim().slice(0, 200) === (sNote.dataset.was || '')) dropDraft(sess.key); else saveDraft(sNote); });
+                sNote.addEventListener('change', finish);
+                // 'change' does not always come on a phone, so leaving the field finishes the edit too
+                sNote.addEventListener('blur', () => setTimeout(finish, 0));
+                card.appendChild(sNote);
+                const sRow = el('div', null, 'row mt');
+                const sKey = 'session:' + sess.key;
+                const sendB = el('button', prepared.has(sKey) ? 'Tap to send' : 'Send session as one zip', 'ghost');
+                sendB.type = 'button'; sendB.dataset.role = 'shareSession';
+                sendB.addEventListener('click', () => {
+                    commitSessionNotes();       // a note typed a moment ago belongs in what is sent
+                    // the session as it is now, not as it was when this button was drawn
+                    send(sKey, () => { const now = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === sess.key) || sess; return prepareZip(now.records.slice().reverse(), now.fileBase); }, sendB, 'Send session as one zip');
                 });
-                note.addEventListener('change', () => {
-                    if (rebuilding || !note.isConnected) return;     // the list was rebuilt under the cursor: the typing goes on in the new field
-                    const text = note.value.trim().slice(0, 200);
-                    if (text !== rec.note) { rec.note = text; touched(rec); }
-                    marks();
-                    clearTimeout(noteTimers.get(rec.id));
-                    writeNote();
-                });
-                line.appendChild(note);
-                // location, photo and the buttons for this one measurement are folded away until asked for
-                const more = el('div', null, 'more');
-                more.hidden = !openRecs.has(rec.id);
-                const toggle = el('button', more.hidden ? 'More' : 'Less', 'ghost moreBtn');
-                toggle.type = 'button'; toggle.dataset.role = 'more';
-                toggle.setAttribute('aria-expanded', more.hidden ? 'false' : 'true');
-                toggle.addEventListener('click', () => {
-                    more.hidden = !more.hidden;
-                    if (more.hidden) openRecs.delete(rec.id); else openRecs.add(rec.id);
-                    toggle.textContent = more.hidden ? 'More' : 'Less';
+                sRow.appendChild(sendB);
+                card.appendChild(sRow);
+                const list = el('div', null, 'recs');
+                sess.records.forEach((rec) => {
+                    const box = el('div', null, 'rec');
+                    box.dataset.id = rec.id;
+                    const p = R.localParts(rec);
+                    const head = el('p', null, 'recHead');
+                    head.appendChild(el('b', p.time + ':' + p.compact.slice(4)));
+                    head.appendChild(document.createTextNode(' ' + (rec.kind === 'sweep' ? 'Sweep' : 'Clap') + ' ' + rec.fMin + '–' + rec.fMax + ' Hz · ' + R.peakSummary(rec, 4) +
+                        (rec.audio ? ' · sound ' + rec.audio.durationS.toFixed(1) + ' s' : '')));
+                    head.appendChild(el('span', placeKey(rec.sessionNote) && placeKey(rec.sessionNote) !== placeKey(sess.note) ? ' · place: ' + rec.sessionNote : '', 'flag-todo placeTag'));
+                    box.appendChild(head);
+                    box.appendChild(flagLine(rec));
+                    // one line per measurement for a note about just that one, written as it is typed
+                    const line = el('div', null, 'noteLine');
+                    const note = document.createElement('input');
+                    note.type = 'text'; note.className = 'recNote'; note.maxLength = 200; note.autocomplete = 'off';
+                    note.placeholder = 'Note for this one (optional)'; note.value = rec.note || ''; note.dataset.id = rec.id;
+                    note.setAttribute('aria-label', 'Note for the measurement of ' + p.time + ':' + p.compact.slice(4));
+                    const writeNote = () => { noteTimers.delete(rec.id); putRecord(rec).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.')); };
+                    // only this record's own lines are refreshed: rebuilding the list here would swallow the tap that ended the typing
+                    const marks = () => { const old = box.querySelector('.flags'); if (old) old.replaceWith(flagLine(rec)); describe(); summaries(); };
+                    note.addEventListener('input', () => {
+                        rec.note = note.value.slice(0, 200);
+                        touched(rec);
+                        marks();
+                        clearTimeout(noteTimers.get(rec.id));
+                        noteTimers.set(rec.id, setTimeout(writeNote, 400));
+                    });
+                    note.addEventListener('change', () => {
+                        if (rebuilding || !note.isConnected) return;     // the list was rebuilt under the cursor: the typing goes on in the new field
+                        const text = note.value.trim().slice(0, 200);
+                        if (text !== rec.note) { rec.note = text; touched(rec); }
+                        marks();
+                        clearTimeout(noteTimers.get(rec.id));
+                        writeNote();
+                    });
+                    line.appendChild(note);
+                    // location, photo and the buttons for this one measurement are folded away until asked for
+                    const more = el('div', null, 'more');
+                    more.hidden = !openRecs.has(rec.id);
+                    const toggle = el('button', more.hidden ? 'More' : 'Less', 'ghost moreBtn');
+                    toggle.type = 'button'; toggle.dataset.role = 'more';
                     toggle.setAttribute('aria-expanded', more.hidden ? 'false' : 'true');
+                    toggle.addEventListener('click', () => {
+                        more.hidden = !more.hidden;
+                        if (more.hidden) openRecs.delete(rec.id); else openRecs.add(rec.id);
+                        toggle.textContent = more.hidden ? 'More' : 'Less';
+                        toggle.setAttribute('aria-expanded', more.hidden ? 'false' : 'true');
+                    });
+                    line.appendChild(toggle);
+                    box.appendChild(line);
+                    const loc = el('p', locationLine(rec) + ' ', 'hint');
+                    loc.dataset.role = 'location';
+                    if (rec.location) { const a = el('a', 'map'); a.href = R.mapsUrl(rec.location); a.target = '_blank'; a.rel = 'noopener'; loc.appendChild(a); }
+                    more.appendChild(loc);
+                    if (rec.photo) {
+                        const img = document.createElement('img');
+                        img.alt = 'Photo for this measurement';
+                        if (thumbs.has(rec.id)) img.src = thumbs.get(rec.id);
+                        else loadThumb(rec.id, img);
+                        more.appendChild(img);
+                    }
+                    const row = el('div', null, 'row mt');
+                    const button = (label, role, handler) => { const b = el('button', label, 'ghost'); b.type = 'button'; b.dataset.role = role; b.addEventListener('click', () => handler(rec, b)); row.appendChild(b); };
+                    button('Show', 'show', showRecord);
+                    button(rec.photo ? 'New photo' : 'Add photo', 'photo', pickPhoto);
+                    button(prepared.has(rec.id) ? 'Tap to send' : 'Send', 'share', shareRecord);
+                    button('Delete', 'delete', deleteRecord);
+                    more.appendChild(row);
+                    box.appendChild(more);
+                    list.appendChild(box);
                 });
-                line.appendChild(toggle);
-                box.appendChild(line);
-                const loc = el('p', locationLine(rec) + ' ', 'hint');
-                loc.dataset.role = 'location';
-                if (rec.location) { const a = el('a', 'map'); a.href = R.mapsUrl(rec.location); a.target = '_blank'; a.rel = 'noopener'; loc.appendChild(a); }
-                more.appendChild(loc);
-                if (rec.photo) {
-                    const img = document.createElement('img');
-                    img.alt = 'Photo for this measurement';
-                    if (thumbs.has(rec.id)) img.src = thumbs.get(rec.id);
-                    else loadThumb(rec.id, img);
-                    more.appendChild(img);
-                }
-                const row = el('div', null, 'row mt');
-                const button = (label, role, handler) => { const b = el('button', label, 'ghost'); b.type = 'button'; b.dataset.role = role; b.addEventListener('click', () => handler(rec, b)); row.appendChild(b); };
-                button('Show', 'show', showRecord);
-                button(rec.photo ? 'New photo' : 'Add photo', 'photo', pickPhoto);
-                button(prepared.has(rec.id) ? 'Tap to send' : 'Send', 'share', shareRecord);
-                button('Delete', 'delete', deleteRecord);
-                more.appendChild(row);
-                box.appendChild(more);
-                list.appendChild(box);
+                card.appendChild(list);
+                host.appendChild(card);
             });
-            card.appendChild(list);
-            host.appendChild(card);
-        });
-        rebuilding = false;
+        } finally { rebuilding = false; }
         if (typing) {
             const again = Array.from(host.querySelectorAll('.' + typing.cls)).find((n) => n.dataset.id === typing.id);
             if (again) { again.focus(); try { again.setSelectionRange(typing.at, typing.at); } catch (e) { /* ignore */ } }
@@ -1338,9 +1385,10 @@
                     lat: c.latitude, lon: c.longitude, accuracyM: c.accuracy,
                     altitudeM: c.altitude, altitudeAccuracyM: c.altitudeAccuracy, time: new Date(pos.timestamp).toISOString(),
                 });
-                if (rec.sentAt && JSON.stringify(rec.location) !== JSON.stringify(before)) touched(rec);
+                const better = JSON.stringify(rec.location) !== JSON.stringify(before);
+                if (better && rec.sentAt) touched(rec);
                 if (rec.location && rec.location.accuracyM != null && rec.location.accuracyM <= 10) finish('ok');
-                else if (saved.includes(rec)) putRecord(rec).catch(() => {}).then(renderSaved);
+                else if (better && saved.includes(rec)) putRecord(rec).catch(() => {}).then(renderSaved);
             }, (err) => {
                 // code 1 = refused. Other errors may be followed by a fix, so only the timer ends those.
                 if (err && err.code === 1) finish('denied');
@@ -1480,6 +1528,7 @@
     }
 
     function showRecord(rec) {
+        commitSessionNotes();
         if (voice || clapBusy) stopAll();
         viewing = rec;
         const host = $('peaks');
@@ -1705,7 +1754,7 @@
             else { button.textContent = idleLabel; savedMsg('Something changed while the files were being built. Tap once more to send the current state.'); }
         }
     }
-    const shareRecord = (rec, button) => send(rec.id, () => prepareRecord(rec), button, 'Send');
+    const shareRecord = (rec, button) => { commitSessionNotes(); return send(rec.id, () => prepareRecord(rec), button, 'Send'); };
 
     function deleteRecord(rec, button) {
         if (button.dataset.armed !== '1') {
@@ -1764,7 +1813,7 @@
         }
         renderSaved();
         if (saved.length) askPersist();
-        if (!loadFailed) recoverCheckpoints();
+        if (!loadFailed) { recoverDraft(); recoverCheckpoints(); }
     }
 
     // ---------- Tabs ----------
@@ -1772,7 +1821,7 @@
     // so it works the same with no network. Sound and microphone keep running across tabs.
     function showTab(name, byUser) {
         if (!CHOICES.tab.includes(name)) name = DEFAULTS.tab;
-        if (byUser && commitSessionNotes()) renderSaved();
+        if (byUser) commitSessionNotes();
         const changed = settings.tab !== name;
         if (byUser && !changed) return;     // tapping the open tab again must not disturb anything on it
         settings.tab = name;
@@ -1941,7 +1990,7 @@
     $('saveNote').addEventListener('change', noteTyped);
     const again = () => { if (loadFailed) loadSaved().then(retryUnstored); else retryUnstored(); };
     setInterval(again, 15000);
-    document.addEventListener('visibilitychange', () => { if (document.hidden) { if (commitSessionNotes()) renderSaved(); } else again(); });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) commitSessionNotes(); else again(); });
     window.addEventListener('pagehide', () => { commitSessionNotes(); });
     $('openSaved').addEventListener('click', () => showTab('saved', true));
     $('photoInput').addEventListener('change', photoChosen);
@@ -1979,7 +2028,7 @@
     if (updater) updater.busy = () => {
         const a = document.activeElement;
         const typing = !!a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && (a.type === 'text' || a.type === 'number')));
-        return !!(voice || micOn || clapBusy || recording || curveState === 'done' || unstored.size || pendingWrites || locating || photoBusy || noteTimers.size || typing);
+        return !!(voice || micOn || clapBusy || recording || curveState === 'done' || unstored.size || pendingWrites || locating || photoBusy || noteTimers.size || typing || uncommittedNotes());
     };
     syncInputs();
     if (!recompute()) {
