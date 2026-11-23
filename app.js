@@ -8,8 +8,8 @@
 
     // Must equal VERSION in sw.js (a test checks it). Change both for every release:
     // the new sw.js is what makes phones fetch the new files, all at once.
-    const BUILD = '2.4.0';
-    const RELEASED = '2026-11-22T18:25:00Z';   // when this version was published; the same value is in sw.js
+    const BUILD = '2.5.0';
+    const RELEASED = '2026-11-23T12:24:00Z';   // when this version was published; the same value is in sw.js
     const MATCH_TOL = 1.5;    // percent: how close a measured peak must be to a listed mode
 
     // Registering the service worker and reloading into a new version is done by the small
