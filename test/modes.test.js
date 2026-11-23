@@ -432,3 +432,32 @@ test('zipStore writes a zip that a standard unzip reads back byte for byte', () 
   assert.strictEqual(R.zipStore([]).length, 22, 'an empty zip is still a zip');
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('the phone position: pose names, angles and "moved since the previous measurement"', () => {
+  const R = require('../records.js');
+  assert.strictEqual(R.poseName([0, 0, -9.81]), 'flat, screen up');
+  assert.strictEqual(R.poseName([0, 0, 9.81]), 'flat, screen down');
+  assert.strictEqual(R.poseName([0, -9.81, 0]), 'upright');
+  assert.strictEqual(R.poseName([0, 9.81, 0]), 'upside down');
+  assert.strictEqual(R.poseName([-9.81, 0, 0]), 'on its left edge', 'gravity points to the edge the phone rests on');
+  assert.strictEqual(R.poseName([9.81, 0, 0]), 'on its right edge');
+  assert.strictEqual(R.movedSince({ gravity: [0, 0, -9.81] }, { gravity: [0, 0, -9.81] }, NaN).moved, false);
+  assert.strictEqual(R.makeRecord({ kind: 'clap', motion: { gravity: [0, 0, -9.8], get headingDeg() { throw new Error('boom'); } } }).motion, null, 'a broken motion note never stops a record being made');
+  assert.strictEqual(R.poseName([0, -6.94, -6.94]), 'tilted 45° from flat');
+  assert.strictEqual(R.poseName([0, 0, 0]), 'unknown');
+  assert.strictEqual(R.poseName(null), 'unknown');
+  assert.ok(Math.abs(R.angleDeg([0, 0, -1], [0, -1, 0]) - 90) < 1e-9);
+  assert.strictEqual(R.angleDeg([0, 0, 0], [0, 0, 1]), null);
+  const flat = { gravity: [0, 0, -9.81] }, nudged = { gravity: [0, -0.3, -9.8] }, turned = { gravity: [0, -1.7, -9.66] };
+  assert.deepStrictEqual(R.movedSince(null, flat, 0), { moved: null, angleDeg: null }, 'the first measurement has nothing to compare with');
+  assert.strictEqual(R.movedSince(flat, nudged, 0).moved, false, 'under two degrees and no handling: same position');
+  assert.strictEqual(R.movedSince(flat, turned, 0).moved, true, 'ten degrees of tilt: moved');
+  assert.strictEqual(R.movedSince(flat, flat, 150).moved, false, 'a tap on the screen is not a move');
+  assert.strictEqual(R.movedSince(flat, flat, 800).moved, true, 'picked up and put back the same way still counts as moved');
+  // stored form
+  const rec = R.makeRecord({ kind: 'clap', motion: { gravity: [0.01234, -0.2, -9.80665], headingDeg: 211.6, movedSincePrevious: true, angleFromPreviousDeg: 12.34, inMotionBeforeMs: 1234.5, inMotionDuringMs: 0, shakeRms: 0.01234, turnRms: 0.456, samples: 240, rateHz: 59.94 } });
+  assert.deepStrictEqual(rec.motion, { gravity: [0.012, -0.2, -9.807], pose: 'flat, screen up', headingDeg: 212, movedSincePrevious: true, angleFromPreviousDeg: 12.3, inMotionBeforeMs: 1235, inMotionDuringMs: 0, shakeRms: 0.012, turnRms: 0.46, samples: 240, rateHz: 60 });
+  assert.strictEqual(R.makeRecord({ kind: 'clap' }).motion, null, 'no sensor: no motion data, and nothing else changes');
+  assert.strictEqual(R.makeRecord({ kind: 'clap', motion: { gravity: [NaN, 0, 0] } }).motion, null);
+  assert.strictEqual(R.makeRecord({ kind: 'clap', motion: { gravity: [0, 0, -9.8], movedSincePrevious: 'yes' } }).motion.movedSincePrevious, null);
+});
