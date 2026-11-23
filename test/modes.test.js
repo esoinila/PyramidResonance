@@ -289,9 +289,12 @@ test('makeRecord keeps the spectrum, rounds it, and survives a JSON round trip',
 test('local time and file names follow the place where it was measured', () => {
   const rec = Rec.makeRecord({ time: new Date('2027-03-10T03:04:05Z'), tzOffsetMin: -300, note: 'Sacsayhuamán, niche 3!' });
   assert.deepStrictEqual(Rec.localParts(rec), { date: '2027-03-09', time: '22:04', compact: '220405' });
-  assert.strictEqual(Rec.fileBase(rec), 'resonance-2027-03-09-220405-sacsayhuaman-niche-3');
-  assert.strictEqual(Rec.fileBase(Rec.makeRecord({ time: new Date('2027-03-10T03:04:05Z'), tzOffsetMin: 120 })), 'resonance-2027-03-10-050405');
-  assert.ok(!/[^a-z0-9-]/.test(Rec.fileBase(Rec.makeRecord({ note: '../../etc/passwd <b>äö</b> 🤠' }))));
+  // date and time first, short enough for a phone's file list to show whole
+  assert.strictEqual(Rec.fileBase(rec), '2027-03-09_220405_clap_sacsayhuaman-nic');
+  const plain = Rec.fileBase(Rec.makeRecord({ time: new Date('2027-03-10T03:04:05Z'), tzOffsetMin: 120, kind: 'sweep' }));
+  assert.strictEqual(plain, '2027-03-10_050405_sweep');
+  assert.ok(plain.length <= 24, 'a name without a note fits two short lines');
+  assert.ok(!/[^a-z0-9_-]/.test(Rec.fileBase(Rec.makeRecord({ note: '../../etc/passwd <b>äö</b> 🤠' }))));
 });
 
 test('locations: cleaned, formatted, and the more accurate fix wins', () => {
@@ -392,4 +395,40 @@ test('app.js never drops a measurement on a storage failure, and has no manual S
   assert.ok(!/id="saveBtn"|id="keepAudio"/.test(page), 'no Save button and no switch for keeping the sound');
   assert.ok(/saved\.unshift\(rec\);\s*unstored\.add\(rec\);/.test(app), 'a measurement enters the list before storage is even tried');
   for (const fn of ['finishSweep', 'keepPartialSweep', 'cancelClap']) assert.ok(new RegExp('function ' + fn + '\\b').test(app), fn);
+});
+
+test('measurements are grouped into sessions by the pauses between them', () => {
+  const R = require('../records.js');
+  const at = (iso, extra) => R.makeRecord(Object.assign({ time: new Date(iso), tzOffsetMin: 120, kind: 'clap' }, extra || {}));
+  const recs = [at('2026-11-23T10:00:57Z', { sessionNote: 'Bike cellar' }), at('2026-11-23T10:03:20Z', { sessionNote: 'Bike cellar' }), at('2026-11-23T10:01:06Z'),
+    at('2026-11-22T16:58:05Z', { sessionNote: 'Yesterday' }), at('2026-11-23T10:40:00Z')];
+  const s = R.sessions(recs.slice().reverse());
+  assert.deepStrictEqual(s.map((x) => x.records.length), [1, 3, 1], 'newest session first; 36 min 40 s after the last clap starts a new one');
+  assert.deepStrictEqual(s[1].records.map((r) => R.localParts(r).compact), ['120320', '120106', '120057'], 'newest first inside a session');
+  assert.strictEqual(s[1].note, 'Bike cellar');
+  assert.strictEqual(s[1].fileBase, '2026-11-23_1200_bike-cellar_3-measurements');
+  assert.strictEqual(s[2].fileBase, '2026-11-22_1858_yesterday_1-measurement');
+  assert.strictEqual(s[1].key, s[1].records[2].id, 'a session is known by its first measurement, so it keeps its identity as it grows');
+  assert.deepStrictEqual(R.sessions([]), []);
+  assert.strictEqual(R.sessions(recs, 60).length, 2, 'the pause is adjustable');
+});
+
+test('zipStore writes a zip that a standard unzip reads back byte for byte', () => {
+  const R = require('../records.js'), fs = require('node:fs'), os = require('node:os'), path = require('node:path'), { spawnSync } = require('node:child_process');
+  assert.strictEqual(R.crc32(Uint8Array.from(Buffer.from('123456789'))), 0xCBF43926);
+  const big = new Uint8Array(300000); for (let i = 0; i < big.length; i++) big[i] = (i * 31 + (i >> 8)) & 255;
+  const files = [{ name: '2026-11-23_120106_clap.wav', bytes: big, time: new Date(2026, 10, 23, 12, 1, 6) },
+    { name: 'session.json', bytes: Uint8Array.from(Buffer.from(JSON.stringify({ note: 'pyöräkellari 🤠' }))) },
+    { name: 'session.json', bytes: new Uint8Array(0) }, { name: 'a/b\\c.txt', bytes: Uint8Array.from([1, 2, 3]) }];
+  const zip = R.zipStore(files);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pyramid-zip-')), file = path.join(dir, 't.zip');
+  fs.writeFileSync(file, zip);
+  const py = spawnSync('python3', ['-c', 'import zipfile,sys,json,hashlib\nz=zipfile.ZipFile(sys.argv[1])\nassert z.testzip() is None\nprint(json.dumps([[i.filename,i.file_size,hashlib.md5(z.read(i)).hexdigest(),list(i.date_time)] for i in z.infolist()]))', file], { encoding: 'utf8' });
+  assert.strictEqual(py.status, 0, py.stderr);
+  const got = JSON.parse(py.stdout), md5 = (b) => require('node:crypto').createHash('md5').update(b).digest('hex');
+  assert.deepStrictEqual(got.map((g) => g[0]), ['2026-11-23_120106_clap.wav', 'session.json', 'session_2.json', 'a_b_c.txt'], 'names are kept, made unique, and cannot climb out of the folder');
+  assert.deepStrictEqual(got.map((g) => g[2]), files.map((f) => md5(f.bytes)));
+  assert.deepStrictEqual(got[0][3], [2026, 11, 23, 12, 1, 6]);
+  assert.strictEqual(R.zipStore([]).length, 22, 'an empty zip is still a zip');
+  fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -70,7 +70,12 @@
       time: iso,
       tzOffsetMin: num(input.tzOffsetMin) == null ? -time.getTimezoneOffset() : input.tzOffsetMin,
       kind: input.kind === 'sweep' ? 'sweep' : 'clap',
-      note: String(input.note || '').trim().slice(0, 200),
+      note: String(input.note || '').trim().slice(0, 200),                 // about this one measurement
+      sessionNote: String(input.sessionNote || '').trim().slice(0, 200),   // the place or subject of the whole session
+      // Stable identities, so that links survive when names are edited or this format grows:
+      uuid: isUuid(input.uuid) ? input.uuid : uuid(),                    // this measurement
+      sessionId: isUuid(input.sessionId) ? input.sessionId : null,       // the session it was made in
+      placeId: isUuid(input.placeId) ? input.placeId : null,             // the place, whatever it is called now
       location: cleanLocation(input.location),
       locationStatus: input.locationStatus || 'pending',   // pending | ok | denied | unavailable | off
       room: input.room || null,
@@ -101,12 +106,119 @@
     };
   }
 
-  // File name stem shared by a record's data, chart and photo, so they sort together
+  const slugOf = (text, max) => String(text || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, max).replace(/-+$/, '');
+
+  // File name stem shared by a record's data, chart, photo and sound, so they sort together.
+  // The date and time come first and the whole stem is short, because a phone's file list
+  // shows only the first twenty-odd characters: "2026-11-23_120106_clap".
   function fileBase(rec) {
-    const p = localParts(rec);
-    const slug = String(rec.note || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
-      .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30);
-    return 'resonance-' + p.date + '-' + p.compact + (slug ? '-' + slug : '');
+    const p = localParts(rec), slug = slugOf(rec.note, 16);     // short: a long name pushes the time out of sight
+    return p.date + '_' + p.compact + '_' + (rec.kind === 'sweep' ? 'sweep' : 'clap') + (slug ? '_' + slug : '');
+  }
+
+  // A random RFC 4122 version 4 identifier
+  function uuid() {
+    const c = typeof crypto !== 'undefined' ? crypto : null;
+    if (c && c.randomUUID) return c.randomUUID();
+    const b = new Uint8Array(16);
+    if (c && c.getRandomValues) c.getRandomValues(b); else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
+    b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+    const h = Array.from(b, (x) => (x + 256).toString(16).slice(1)).join('');
+    return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
+  }
+  const isUuid = (x) => typeof x === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(x);
+
+  // Measurements are made in sessions: a run of them with no pause longer than gapMin minutes.
+  // Takes records in any order; returns sessions newest first, each with its records newest first.
+  function sessions(records, gapMin) {
+    const gap = (gapMin == null ? 30 : gapMin) * 60000;
+    const sorted = records.slice().sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+    const out = [], byId = {};
+    let cur = null, last = 0;
+    sorted.forEach((rec) => {
+      // a record that knows its session goes there; older records without one are grouped by the pauses
+      if (rec.sessionId) {
+        if (!byId[rec.sessionId]) { byId[rec.sessionId] = { records: [], id: rec.sessionId }; out.push(byId[rec.sessionId]); }
+        byId[rec.sessionId].records.push(rec);
+        return;
+      }
+      const t = new Date(rec.time).getTime();
+      if (!cur || t - last > gap) { cur = { records: [], id: null }; out.push(cur); }
+      cur.records.push(rec);
+      last = t;
+    });
+    out.sort((a, b) => (a.records[0].time < b.records[0].time ? -1 : 1));
+    out.forEach((s) => {
+      const first = s.records[0], end = s.records[s.records.length - 1];
+      // the note most of its records carry is the session's note
+      const count = {};
+      s.records.forEach((x) => { const n = x.sessionNote || ''; count[n] = (count[n] || 0) + 1; });
+      s.note = Object.keys(count).sort((a, b) => count[b] - count[a] || (a < b ? -1 : 1))[0] || '';
+      s.key = s.id || first.id;
+      s.start = localParts(first); s.end = localParts(end);
+      const slug = slugOf(s.note, 24);
+      // "2026-11-23_1200_bike-cellar_14-measurements"
+      s.fileBase = s.start.date + '_' + s.start.compact.slice(0, 4) + (slug ? '_' + slug : '') + '_' + s.records.length + '-measurement' + (s.records.length === 1 ? '' : 's');
+      s.records.reverse();
+    });
+    return out.reverse();
+  }
+
+  // ---------- one zip file out of many files ----------
+  // Stored without compression (sound does not shrink anyway). files: [{ name, bytes: Uint8Array, time: Date }]
+  let crcTable = null;
+  function crc32(bytes) {
+    if (!crcTable) {
+      crcTable = new Uint32Array(256);
+      for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; crcTable[n] = c >>> 0; }
+    }
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) c = crcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+  function utf8(text) {
+    if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(text);
+    return Uint8Array.from(Buffer.from(text, 'utf8'));
+  }
+  function zipStore(files) {
+    const seen = {}, entries = files.map((f) => {
+      // two files may not share a name inside one zip
+      let name = String(f.name).replace(/[\\/]+/g, '_');
+      if (seen[name]) { const dot = name.lastIndexOf('.'); name = (dot > 0 ? name.slice(0, dot) : name) + '_' + (++seen[name]) + (dot > 0 ? name.slice(dot) : ''); } else seen[name] = 1;
+      const bytes = f.bytes instanceof Uint8Array ? f.bytes : new Uint8Array(f.bytes);
+      const t = f.time instanceof Date && Number.isFinite(f.time.getTime()) ? f.time : new Date();
+      return { name: utf8(name), bytes, crc: crc32(bytes),
+        dosTime: (t.getHours() << 11) | (t.getMinutes() << 5) | (t.getSeconds() >> 1),
+        dosDate: (Math.max(0, t.getFullYear() - 1980) << 9) | ((t.getMonth() + 1) << 5) | t.getDate() };
+    });
+    let size = 22;
+    entries.forEach((e) => { size += 30 + e.name.length + e.bytes.length + 46 + e.name.length; });
+    if (size > 0xFFFFFFF0 || entries.length > 0xFFF0) throw new Error('Too much for one zip file.');
+    const out = new Uint8Array(size), v = new DataView(out.buffer);
+    let at = 0;
+    entries.forEach((e) => {
+      e.offset = at;
+      v.setUint32(at, 0x04034b50, true); v.setUint16(at + 4, 20, true); v.setUint16(at + 6, 0x0800, true); v.setUint16(at + 8, 0, true);
+      v.setUint16(at + 10, e.dosTime, true); v.setUint16(at + 12, e.dosDate, true); v.setUint32(at + 14, e.crc, true);
+      v.setUint32(at + 18, e.bytes.length, true); v.setUint32(at + 22, e.bytes.length, true);
+      v.setUint16(at + 26, e.name.length, true); v.setUint16(at + 28, 0, true);
+      out.set(e.name, at + 30); out.set(e.bytes, at + 30 + e.name.length);
+      at += 30 + e.name.length + e.bytes.length;
+    });
+    const dirStart = at;
+    entries.forEach((e) => {
+      v.setUint32(at, 0x02014b50, true); v.setUint16(at + 4, 20, true); v.setUint16(at + 6, 20, true); v.setUint16(at + 8, 0x0800, true); v.setUint16(at + 10, 0, true);
+      v.setUint16(at + 12, e.dosTime, true); v.setUint16(at + 14, e.dosDate, true); v.setUint32(at + 16, e.crc, true);
+      v.setUint32(at + 20, e.bytes.length, true); v.setUint32(at + 24, e.bytes.length, true);
+      v.setUint16(at + 28, e.name.length, true);
+      v.setUint32(at + 42, e.offset, true);
+      out.set(e.name, at + 46);
+      at += 46 + e.name.length;
+    });
+    v.setUint32(at, 0x06054b50, true); v.setUint16(at + 8, entries.length, true); v.setUint16(at + 10, entries.length, true);
+    v.setUint32(at + 12, at - dirStart, true); v.setUint32(at + 16, dirStart, true);
+    return out;
   }
 
   function formatLocation(loc) {
@@ -133,7 +245,7 @@
   function shareText(rec) {
     const p = localParts(rec);
     const lines = [
-      'Resonance measurement (' + rec.kind + '), ' + p.date + ' ' + p.time + (rec.note ? ', ' + rec.note : ''),
+      'Resonance measurement (' + rec.kind + '), ' + p.date + ' ' + p.time + (rec.sessionNote ? ', ' + rec.sessionNote : '') + (rec.note ? ', ' + rec.note : ''),
       'Peaks: ' + peakSummary(rec, 8),
       'Range: ' + rec.fMin + '–' + rec.fMax + ' Hz',
     ];
@@ -190,5 +302,5 @@
     return { type: 'audio/wav', format: 'float32', sampleRate: rate, channels: 1, samples: sampleCount, durationS: round(sampleCount / rate, 3) };
   }
 
-  return { SCHEMA, encodeWav, audioInfo, cleanLocation, betterFix, makeRecord, localParts, fileBase, formatLocation, mapsUrl, peakSummary, shareText, exportAll, fitSize };
+  return { SCHEMA, encodeWav, audioInfo, cleanLocation, betterFix, makeRecord, localParts, fileBase, formatLocation, mapsUrl, peakSummary, shareText, exportAll, fitSize, sessions, zipStore, crc32, uuid, isUuid };
 });

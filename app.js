@@ -8,8 +8,8 @@
 
     // Must equal VERSION in sw.js (a test checks it). Change both for every release:
     // the new sw.js is what makes phones fetch the new files, all at once.
-    const BUILD = '2.4.0';
-    const RELEASED = '2026-11-22T18:25:00Z';   // when this version was published; the same value is in sw.js
+    const BUILD = '2.5.0';
+    const RELEASED = '2026-11-23T12:24:00Z';   // when this version was published; the same value is in sw.js
     const MATCH_TOL = 1.5;    // percent: how close a measured peak must be to a listed mode
 
     // Registering the service worker and reloading into a new version is done by the small
@@ -831,7 +831,7 @@
     const recCurve = (rec) => rec.curve.map((p) => ({ f: p[0], db: p[1] }));
     function recTitle(rec) {
         const p = R.localParts(rec);
-        return p.date + ' ' + p.time + (rec.note ? ' · ' + rec.note : '');
+        return p.date + ' ' + p.time + (rec.sessionNote ? ' · ' + rec.sessionNote : '') + (rec.note ? ' · ' + rec.note : '');
     }
 
     function drawChart(cursorF) {
@@ -949,10 +949,19 @@
     // (audioPending keeps the sound's description, so that if the sound did reach storage after all it is found again at the next start)
     const dbCopy = (rec) => (unstored.has(rec) && memAudio.has(rec.id) ? Object.assign({}, rec, { audio: null, audioMissing: true, audioPending: rec.audio }) : rec);
     // Any change to a record after it was sent means the copy outside the phone is out of date
-    function touched(rec) { rec.sentAt = null; prepared.delete(rec.id); prepared.delete('all'); }
+    // Files built for a send that waits for its second tap are out of date as soon as anything changes:
+    // the record's own, the "everything" zip, and every session zip.
+    let changeCount = 0;            // goes up with every change to any record
+    const changedAt = new Map();    // record id -> changeCount at its last change
+    function forgetPrepared(rec) {
+        changeCount++;
+        if (rec) { prepared.delete(rec.id); changedAt.set(rec.id, changeCount); }
+        Array.from(prepared.keys()).forEach((k) => { if (k === 'all' || String(k).indexOf('session:') === 0) prepared.delete(k); });
+    }
+    function touched(rec) { rec.sentAt = null; forgetPrepared(rec); }
     // A record still held in memory is written whole by storeRecord, so a small update only needs to wait for that.
     const putRecord = (rec) => {
-        prepared.delete(rec.id); prepared.delete('all');
+        forgetPrepared(rec);
         if (deleted.has(rec.id)) return Promise.resolve();
         // being written right now, or waiting to be: storeRecord writes the whole record, and once more when it is done
         if (inFlight.has(rec) || (unstored.has(rec) && !memAudio.has(rec.id))) return Promise.resolve();
@@ -1015,6 +1024,7 @@
         if (rec.interrupted) out.push(['interrupted', 'bad']);
         if (rec.kind === 'clap' && !rec.audio) out.push(['NO SOUND', 'bad']);
         if (rec.disturbed) out.push(['volume changed during the sweep', 'bad']);
+        if (!rec.location && rec.locationStatus !== 'pending') out.push(['no location', 'todo']);
         out.push(rec.sentAt ? ['sent ' + whenShort(rec.sentAt), 'ok'] : ['not sent yet', 'todo']);
         return out;
     }
@@ -1036,82 +1046,324 @@
         $('savedSummary').textContent = saved.length ? saved.length + (saved.length === 1 ? ' measurement' : ' measurements') + ' on this phone, ' + (unsent ? unsent + ' not sent yet.' : 'all sent.') : '';
         $('recentTitle').textContent = saved.length + ' saved on this phone' + (unsent ? ', ' + unsent + ' not sent yet' : ', all sent') + '. Newest first' + (saved.length > 5 ? ' (the last 5; all are on the Saved tab)' : '') + ':';
     }
+    // ---------- sessions and places ----------
+    const SESSION_GAP_MIN = 30;
+    // A measurement made within half an hour of the previous one continues that session; otherwise a new one starts
+    // ... and so does one made at a different place: a new place is a new session.
+    function currentSessionId() {
+        const newest = saved[0];
+        if (newest && newest.sessionId && Date.now() - new Date(newest.time).getTime() <= SESSION_GAP_MIN * 60000 &&
+            placeKey(newest.sessionNote) === placeKey($('saveNote').value)) return newest.sessionId;
+        return R.uuid();
+    }
+    // A place keeps one identity under its name: the same name gives the same id, a new name a new id.
+    // editing: the records whose note is being changed right now; they do not count as evidence for the new name.
+    const placeKey = (name) => String(name || '').trim().toLowerCase();
+    const newPlaces = new Map();    // names first used in this run -> the id they were given, so every caller gets the same one
+    function placeIdFor(name, editing) {
+        const key = placeKey(name);
+        if (!key) return null;
+        const skip = editing || new Set();
+        const known = saved.find((r) => !skip.has(r) && r.placeId && placeKey(r.sessionNote) === key);
+        if (known) return known.placeId;
+        // a place that is only being renamed (nothing else uses its id) keeps its identity
+        const own = Array.from(new Set(Array.from(skip).map((r) => r.placeId).filter(Boolean)));
+        if (own.length === 1 && !saved.some((r) => !skip.has(r) && r.placeId === own[0])) {
+            Array.from(newPlaces.keys()).forEach((k) => { if (newPlaces.get(k) === own[0]) newPlaces.delete(k); });    // its earlier names no longer mean this place
+            newPlaces.set(key, own[0]);
+            return own[0];
+        }
+        if (!newPlaces.has(key)) newPlaces.set(key, R.uuid());
+        return newPlaces.get(key);
+    }
+    // The places used before, newest first, offered as suggestions wherever a session note is typed
+    function placeNames() {
+        const seen = new Set(), out = [];
+        saved.forEach((r) => { const n = (r.sessionNote || '').trim(); if (n && !seen.has(placeKey(n))) { seen.add(placeKey(n)); out.push(n); } });
+        return out.slice(0, 40);
+    }
+    // Records saved before sessions and identities existed get them once, by the pauses between them.
+    // The note they carried was the place note of that time, so it becomes the session's note if they agree.
+    function adoptOldRecords(list) {
+        const changed = [];
+        R.sessions(list.filter((r) => !r.sessionId), SESSION_GAP_MIN).forEach((sess) => {
+            const sid = R.uuid();
+            const notes = new Set(sess.records.map((r) => (r.note || '').trim()));
+            const common = notes.size === 1 && sess.records.length > 1 ? Array.from(notes)[0] : '';
+            sess.records.forEach((r) => {
+                r.sessionId = sid;
+                if (!R.isUuid(r.uuid)) r.uuid = R.uuid();
+                if (r.sessionNote == null) r.sessionNote = '';
+                if (common && !r.sessionNote) { r.sessionNote = common; r.note = ''; adoptOldRecords.moved = (adoptOldRecords.moved || 0) + 1; }
+                changed.push(r);
+            });
+        });
+        list.forEach((r) => { if (!R.isUuid(r.uuid)) { r.uuid = R.uuid(); if (!changed.includes(r)) changed.push(r); } });
+        // places: one id per name
+        const ids = {};
+        list.forEach((r) => { const k = placeKey(r.sessionNote); if (k && r.placeId) ids[k] = ids[k] || r.placeId; });
+        list.forEach((r) => {
+            const k = placeKey(r.sessionNote);
+            if (k && !r.placeId) { ids[k] = ids[k] || R.uuid(); r.placeId = ids[k]; if (!changed.includes(r)) changed.push(r); }
+            if (r.placeId === undefined) r.placeId = null;
+        });
+        return changed;
+    }
+    function refreshPlaces() {
+        const places = $('placeList');
+        places.textContent = '';
+        placeNames().forEach((n) => { const o = document.createElement('option'); o.value = n; places.appendChild(o); });
+    }
+    // A session note is applied when its field is left (or Enter is pressed), in one step.
+    // ids: the measurements the field stands for, fixed when the field was drawn: those that carried the session's
+    // note then, and those with none. A measurement with a different note of its own was set on purpose and is
+    // never in that set, whatever is typed later. was: the text the field last stood for.
+    const DRAFT = 'pyramid-res-session-note-draft';
+    function applySessionNote(key, ids, was, text) {
+        text = String(text || '').trim().slice(0, 200);
+        if (text === String(was || '').trim()) return false;            // nothing was changed: nothing is touched
+        const sess = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === key);
+        if (!sess) return false;
+        let targets = new Set(sess.records.filter((r) => ids.has(r.id)));
+        if (!targets.size) targets = new Set(sess.records);       // the ones it stood for are gone: the note is the session's, so it goes to all that are left
+        if (!targets.size) return false;
+        const pid = placeIdFor(text, targets);      // the same name is the same place; a mere rename keeps the identity
+        const writes = [];
+        targets.forEach((r) => {
+            if ((r.sessionNote || '') === text && (r.placeId || null) === (pid || null)) return;
+            r.sessionNote = text;
+            r.placeId = pid || null;
+            touched(r);
+            writes.push(putRecord(r));
+        });
+        // the copy noted down while typing is thrown away only when every measurement has really been written
+        Promise.all(writes).then(() => {
+            try { const d = JSON.parse(localStorage.getItem(DRAFT) || 'null'); if (d && d.key === key && String(d.text || '').trim().slice(0, 200) === text) localStorage.removeItem(DRAFT); } catch (e) { /* ignore */ }
+        }, (e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.'));
+        // The session being measured right now: its note also goes with the next measurements,
+        // unless something else has been typed under the chart for them meanwhile.
+        const live = saved[0] && sess.records[0] === saved[0] && Date.now() - new Date(saved[0].time).getTime() <= SESSION_GAP_MIN * 60000;
+        if (live && placeKey($('saveNote').value) === placeKey(was)) { $('saveNote').value = text; noteTyped(); }
+        return true;
+    }
+    const idsOf = (input) => new Set(String(input.dataset.ids || '').split(' ').filter(Boolean));
+    function saveDraft(input) { try { localStorage.setItem(DRAFT, JSON.stringify({ key: input.dataset.id, ids: input.dataset.ids || '', was: input.dataset.was || '', text: input.value })); } catch (e) { /* ignore */ } }
+    function dropDraft(key) { try { const d = JSON.parse(localStorage.getItem(DRAFT) || 'null'); if (!d || d.key === key) localStorage.removeItem(DRAFT); } catch (e) { /* ignore */ } }
+    // A session note that was being typed when the app was closed is applied at the next start
+    function recoverDraft() {
+        const forget = () => { try { localStorage.removeItem(DRAFT); } catch (e) { /* ignore */ } };
+        let d = null;
+        try { d = JSON.parse(localStorage.getItem(DRAFT) || 'null'); } catch (e) { d = null; }
+        if (!d || typeof d.key !== 'string' || typeof d.text !== 'string') { forget(); return; }
+        const ids = new Set(String(d.ids || '').split(' ').filter(Boolean));
+        // compared with what the measurements carry now, so a note that did get written before the app closed is not applied again
+        const want = d.text.trim().slice(0, 200);
+        const one = saved.find((r) => ids.has(r.id) && (r.sessionNote || '') !== want);      // one that the text has not reached yet
+        if (!one || !applySessionNote(d.key, ids, one.sessionNote || '', d.text)) { forget(); return; }   // (applying it removes the draft once written)
+        renderSaved();
+        savedMsg(want ? 'A session note that was being typed when the app closed ("' + want.slice(0, 60) + '") was applied.' : 'A session note that was being cleared when the app closed was cleared.');
+    }
+    const uncommittedNotes = () => Array.from(document.querySelectorAll('#savedList .sessNote')).some((i) => i.value.trim().slice(0, 200) !== (i.dataset.was || ''));
+    function commitSessionNotes(except) {
+        let changed = false;
+        document.querySelectorAll('#savedList .sessNote').forEach((input) => {
+            if (input === except) return;
+            const was = input.dataset.was || '';
+            if (applySessionNote(input.dataset.id, idsOf(input), was, input.value)) {
+                changed = true;
+                input.dataset.was = input.value.trim().slice(0, 200);
+                // it now also stands for measurements of its session that already carried the new note
+                { const sess = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === input.dataset.id), stood = idsOf(input);
+                    if (sess) sess.records.forEach((r) => { if (placeKey(r.sessionNote) === placeKey(input.dataset.was)) stood.add(r.id); });
+                    input.dataset.ids = Array.from(stood).join(' '); }
+                const card = input.closest('.session');
+                if (card && card.refreshInPlace) card.refreshInPlace(input.dataset.was);
+            }
+        });
+        if (changed) { refreshPlaces(); summaries(); }
+        return changed;
+    }
+    const dateFi = (p) => { const d = p.date.split('-'); return Number(d[2]) + '.' + Number(d[1]) + '.' + d[0]; };
+    const openRecs = new Set();     // records whose extra lines (location, photo, buttons) are unfolded
+    let rebuilding = false;
     function renderSaved() {
         const host = $('savedList');
         // the list is rebuilt while a note may be being typed (a location arrives): keep the cursor where it was
-        const active = document.activeElement, typing = active && active.classList && active.classList.contains('recNote') ? { id: active.dataset.id, at: active.selectionStart } : null;
-        host.textContent = '';
-        $('savedEmpty').hidden = saved.length > 0;
-        summaries();
-        // the newest few are also listed right under the chart, so each new measurement is seen to arrive
-        $('recentBox').hidden = saved.length === 0;
-        $('recentList').textContent = '';
-        saved.slice(0, 5).forEach((rec) => {
-            const b = document.createElement('button'), t = document.createElement('b');
-            b.type = 'button';
-            t.textContent = R.localParts(rec).time + ':' + R.localParts(rec).compact.slice(4);
-            b.appendChild(t);
-            b.appendChild(document.createTextNode(' ' + rec.kind + (rec.audio ? ' + sound' : '') + ' · ' + R.peakSummary(rec, 3) + (rec.note ? ' · ' + rec.note : '')));
-            const bad = flags(rec).filter((f) => f[1] === 'bad').map((f) => f[0]);
-            if (bad.length) { const w = document.createElement('span'); w.className = 'flag-bad'; w.textContent = ' · ' + bad.join(' · '); b.appendChild(w); }
-            b.addEventListener('click', () => showRecord(rec));
-            $('recentList').appendChild(b);
-        });
-        $('shareAll').hidden = saved.length < 2;
-        const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
-        saved.forEach((rec) => {
-            const box = el('div', null, 'rec');
-            box.dataset.id = rec.id;
-            const title = el('b', recTitle(rec));
-            box.appendChild(title);
-            box.appendChild(el('p', (rec.kind === 'sweep' ? 'Sweep' : 'Clap') + ' ' + rec.fMin + '–' + rec.fMax + ' Hz · ' + R.peakSummary(rec, 4) +
-                (rec.audio ? ' · sound ' + rec.audio.durationS.toFixed(1) + ' s' : ''), 'hint'));
-            box.appendChild(flagLine(rec));
-            const loc = el('p', locationLine(rec) + ' ', 'hint');
-            loc.dataset.role = 'location';
-            if (rec.location) { const a = el('a', 'map'); a.href = R.mapsUrl(rec.location); a.target = '_blank'; a.rel = 'noopener'; loc.appendChild(a); }
-            box.appendChild(loc);
-            // each measurement has its own note, written as it is typed
-            const note = document.createElement('input');
-            note.type = 'text'; note.className = 'recNote'; note.maxLength = 200; note.autocomplete = 'off';
-            note.placeholder = 'Note for this measurement'; note.value = rec.note || ''; note.dataset.id = rec.id;
-            note.setAttribute('aria-label', 'Note for the measurement of ' + recTitle(rec));
-            const writeNote = () => { noteTimers.delete(rec.id); putRecord(rec).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.')); };
-            // only this record's own lines are refreshed: rebuilding the list here would swallow the tap that ended the typing
-            const marks = () => { const old = box.querySelector('.flags'); if (old) old.replaceWith(flagLine(rec)); title.textContent = recTitle(rec); summaries(); };
-            note.addEventListener('input', () => {
-                rec.note = note.value.slice(0, 200);
-                touched(rec);
-                marks();
-                clearTimeout(noteTimers.get(rec.id));
-                noteTimers.set(rec.id, setTimeout(writeNote, 400));
+        const active = document.activeElement;
+        const typing = active && active.classList && (active.classList.contains('recNote') || active.classList.contains('sessNote'))
+            ? { cls: active.classList.contains('recNote') ? 'recNote' : 'sessNote', id: active.dataset.id, at: active.selectionStart, value: active.value, was: active.dataset.was || '', ids: active.dataset.ids || '' } : null;
+        // session notes typed but not yet applied are applied now, except the one still being typed, which is carried over as it is
+        commitSessionNotes(typing && typing.cls === 'sessNote' ? active : null);
+        rebuilding = true;      // fields removed from the page fire 'change' and 'blur' in some browsers: those are not the user's
+        try {
+            host.textContent = '';
+            $('savedEmpty').hidden = saved.length > 0;
+            summaries();
+            // the newest few are also listed right under the chart, so each new measurement is seen to arrive
+            $('recentBox').hidden = saved.length === 0;
+            $('recentList').textContent = '';
+            saved.slice(0, 5).forEach((rec) => {
+                const b = document.createElement('button'), t = document.createElement('b');
+                b.type = 'button';
+                t.textContent = R.localParts(rec).time + ':' + R.localParts(rec).compact.slice(4);
+                b.appendChild(t);
+                b.appendChild(document.createTextNode(' ' + rec.kind + (rec.audio ? ' + sound' : '') + ' · ' + R.peakSummary(rec, 3) + (rec.note ? ' · ' + rec.note : '')));
+                const bad = flags(rec).filter((f) => f[1] === 'bad').map((f) => f[0]);
+                if (bad.length) { const w = document.createElement('span'); w.className = 'flag-bad'; w.textContent = ' · ' + bad.join(' · '); b.appendChild(w); }
+                b.addEventListener('click', () => showRecord(rec));
+                $('recentList').appendChild(b);
             });
-            note.addEventListener('change', () => {
-                const text = note.value.trim().slice(0, 200);
-                if (text !== rec.note) { rec.note = text; touched(rec); }
-                marks();
-                clearTimeout(noteTimers.get(rec.id));
-                writeNote();
+            const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
+            const groups = R.sessions(saved, SESSION_GAP_MIN);
+            $('shareAll').hidden = groups.length < 2;
+            refreshPlaces();
+            groups.forEach((sess) => {
+                const card = el('div', null, 'session');
+                card.dataset.key = sess.key;
+                const info = el('p', null, 'hint sessInfo');
+                const describe = () => {
+                    const n = sess.records.length, sounds = sess.records.filter((r) => r.audio).length, unsent = sess.records.filter((r) => !r.sentAt).length;
+                    const bad = {};
+                    sess.records.forEach((r) => flags(r).forEach((f) => { if (f[1] === 'bad') bad[f[0]] = (bad[f[0]] || 0) + 1; }));
+                    info.textContent = n + (n === 1 ? ' measurement' : ' measurements') + (sounds ? ', ' + sounds + ' with sound' : '') + ' · ' + (unsent ? unsent + ' not sent yet' : 'all sent');
+                    Object.keys(bad).forEach((k) => { const w = el('span', ' · ' + bad[k] + ' × ' + k, 'flag-bad'); info.appendChild(w); });
+                };
+                card.appendChild(el('b', dateFi(sess.start) + ' ' + sess.start.time + (sess.end.time !== sess.start.time ? '–' + sess.end.time : ''), 'sessTitle'));
+                describe();
+                card.appendChild(info);
+                // one note for the whole session; it does not replace a different note that single measurements already carry
+                const sNote = document.createElement('input');
+                sNote.type = 'text'; sNote.className = 'sessNote'; sNote.maxLength = 200; sNote.autocomplete = 'off';
+                sNote.placeholder = 'Place or note for this whole session'; sNote.value = sess.note; sNote.dataset.id = sess.key;
+                sNote.setAttribute('list', 'placeList');
+                sNote.setAttribute('aria-label', 'Note for the session of ' + dateFi(sess.start) + ' ' + sess.start.time);
+                sNote.dataset.was = sess.note;
+                sNote.dataset.ids = sess.records.filter((r) => placeKey(r.sessionNote) === placeKey(sess.note) || !placeKey(r.sessionNote)).map((r) => r.id).join(' ');
+                // a field being typed in keeps its text and the measurements it stood for when the typing began
+                if (typing && typing.cls === 'sessNote' && typing.id === sess.key) {
+                    sNote.value = typing.value; sNote.dataset.was = typing.was;
+                    // ... plus any that joined the session meanwhile carrying that same note (a clap that finished while typing)
+                    const stood = new Set(typing.ids.split(' ').filter(Boolean));
+                    sess.records.forEach((r) => { if (placeKey(r.sessionNote) === placeKey(typing.was) || !placeKey(r.sessionNote)) stood.add(r.id); });
+                    sNote.dataset.ids = Array.from(stood).join(' ');
+                }
+                // The lines that depend on the session note are redrawn where they stand. The list is not rebuilt here:
+                // the tap that ended the typing is often on a button of this very list, and must still find it.
+                card.refreshInPlace = (note) => {
+                    sess.note = note;
+                    card.querySelectorAll('.rec').forEach((box) => {
+                        const rec = sess.records.find((r) => r.id === box.dataset.id);
+                        if (!rec) return;
+                        const old = box.querySelector('.flags'); if (old) old.replaceWith(flagLine(rec));
+                        const tag = box.querySelector('.placeTag');
+                        const differs = placeKey(rec.sessionNote) && placeKey(rec.sessionNote) !== placeKey(note);
+                        if (tag) { tag.textContent = differs ? ' · place: ' + rec.sessionNote : ''; }
+                        const one = box.querySelector('[data-role=share]');
+                        if (one && !prepared.has(rec.id)) one.textContent = 'Send';
+                    });
+                    const all = card.querySelector('[data-role=shareSession]');
+                    if (all && !prepared.has('session:' + sess.key)) all.textContent = 'Send session as one zip';     // files built before this change are gone
+                    describe();
+                };
+                const finish = () => {
+                    if (rebuilding || !sNote.isConnected) return;
+                    commitSessionNotes();
+                };
+                // what is being typed is also noted down at once, so that it survives the app being closed before the field is left
+                sNote.addEventListener('input', () => { if (sNote.value.trim().slice(0, 200) === (sNote.dataset.was || '')) dropDraft(sess.key); else saveDraft(sNote); });
+                sNote.addEventListener('change', finish);
+                // 'change' does not always come on a phone, so leaving the field finishes the edit too
+                sNote.addEventListener('blur', () => setTimeout(finish, 0));
+                card.appendChild(sNote);
+                const sRow = el('div', null, 'row mt');
+                const sKey = 'session:' + sess.key;
+                const sendB = el('button', prepared.has(sKey) ? 'Tap to send' : 'Send session as one zip', 'ghost');
+                sendB.type = 'button'; sendB.dataset.role = 'shareSession';
+                sendB.addEventListener('click', () => {
+                    commitSessionNotes();       // a note typed a moment ago belongs in what is sent
+                    // the session as it is now, not as it was when this button was drawn
+                    send(sKey, () => { const now = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === sess.key) || sess; return prepareZip(now.records.slice().reverse(), now.fileBase); }, sendB, 'Send session as one zip');
+                });
+                sRow.appendChild(sendB);
+                card.appendChild(sRow);
+                const list = el('div', null, 'recs');
+                sess.records.forEach((rec) => {
+                    const box = el('div', null, 'rec');
+                    box.dataset.id = rec.id;
+                    const p = R.localParts(rec);
+                    const head = el('p', null, 'recHead');
+                    head.appendChild(el('b', p.time + ':' + p.compact.slice(4)));
+                    head.appendChild(document.createTextNode(' ' + (rec.kind === 'sweep' ? 'Sweep' : 'Clap') + ' ' + rec.fMin + '–' + rec.fMax + ' Hz · ' + R.peakSummary(rec, 4) +
+                        (rec.audio ? ' · sound ' + rec.audio.durationS.toFixed(1) + ' s' : '')));
+                    head.appendChild(el('span', placeKey(rec.sessionNote) && placeKey(rec.sessionNote) !== placeKey(sess.note) ? ' · place: ' + rec.sessionNote : '', 'flag-todo placeTag'));
+                    box.appendChild(head);
+                    box.appendChild(flagLine(rec));
+                    // one line per measurement for a note about just that one, written as it is typed
+                    const line = el('div', null, 'noteLine');
+                    const note = document.createElement('input');
+                    note.type = 'text'; note.className = 'recNote'; note.maxLength = 200; note.autocomplete = 'off';
+                    note.placeholder = 'Note for this one (optional)'; note.value = rec.note || ''; note.dataset.id = rec.id;
+                    note.setAttribute('aria-label', 'Note for the measurement of ' + p.time + ':' + p.compact.slice(4));
+                    const writeNote = () => { noteTimers.delete(rec.id); putRecord(rec).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.')); };
+                    // only this record's own lines are refreshed: rebuilding the list here would swallow the tap that ended the typing
+                    const marks = () => { const old = box.querySelector('.flags'); if (old) old.replaceWith(flagLine(rec)); describe(); summaries(); };
+                    note.addEventListener('input', () => {
+                        rec.note = note.value.slice(0, 200);
+                        touched(rec);
+                        marks();
+                        clearTimeout(noteTimers.get(rec.id));
+                        noteTimers.set(rec.id, setTimeout(writeNote, 400));
+                    });
+                    note.addEventListener('change', () => {
+                        if (rebuilding || !note.isConnected) return;     // the list was rebuilt under the cursor: the typing goes on in the new field
+                        const text = note.value.trim().slice(0, 200);
+                        if (text !== rec.note) { rec.note = text; touched(rec); }
+                        marks();
+                        clearTimeout(noteTimers.get(rec.id));
+                        writeNote();
+                    });
+                    line.appendChild(note);
+                    // location, photo and the buttons for this one measurement are folded away until asked for
+                    const more = el('div', null, 'more');
+                    more.hidden = !openRecs.has(rec.id);
+                    const toggle = el('button', more.hidden ? 'More' : 'Less', 'ghost moreBtn');
+                    toggle.type = 'button'; toggle.dataset.role = 'more';
+                    toggle.setAttribute('aria-expanded', more.hidden ? 'false' : 'true');
+                    toggle.addEventListener('click', () => {
+                        more.hidden = !more.hidden;
+                        if (more.hidden) openRecs.delete(rec.id); else openRecs.add(rec.id);
+                        toggle.textContent = more.hidden ? 'More' : 'Less';
+                        toggle.setAttribute('aria-expanded', more.hidden ? 'false' : 'true');
+                    });
+                    line.appendChild(toggle);
+                    box.appendChild(line);
+                    const loc = el('p', locationLine(rec) + ' ', 'hint');
+                    loc.dataset.role = 'location';
+                    if (rec.location) { const a = el('a', 'map'); a.href = R.mapsUrl(rec.location); a.target = '_blank'; a.rel = 'noopener'; loc.appendChild(a); }
+                    more.appendChild(loc);
+                    if (rec.photo) {
+                        const img = document.createElement('img');
+                        img.alt = 'Photo for this measurement';
+                        if (thumbs.has(rec.id)) img.src = thumbs.get(rec.id);
+                        else loadThumb(rec.id, img);
+                        more.appendChild(img);
+                    }
+                    const row = el('div', null, 'row mt');
+                    const button = (label, role, handler) => { const b = el('button', label, 'ghost'); b.type = 'button'; b.dataset.role = role; b.addEventListener('click', () => handler(rec, b)); row.appendChild(b); };
+                    button('Show', 'show', showRecord);
+                    button(rec.photo ? 'New photo' : 'Add photo', 'photo', pickPhoto);
+                    button(prepared.has(rec.id) ? 'Tap to send' : 'Send', 'share', shareRecord);
+                    button('Delete', 'delete', deleteRecord);
+                    more.appendChild(row);
+                    box.appendChild(more);
+                    list.appendChild(box);
+                });
+                card.appendChild(list);
+                host.appendChild(card);
             });
-            box.appendChild(note);
-            if (rec.photo) {
-                const img = document.createElement('img');
-                img.alt = 'Photo for this measurement';
-                if (thumbs.has(rec.id)) img.src = thumbs.get(rec.id);
-                else loadThumb(rec.id, img);
-                box.appendChild(img);
-            }
-            const row = el('div', null, 'row mt');
-            const button = (label, role, handler) => { const b = el('button', label, 'ghost'); b.type = 'button'; b.dataset.role = role; b.addEventListener('click', () => handler(rec, b)); row.appendChild(b); };
-            button('Show', 'show', showRecord);
-            button(rec.photo ? 'New photo' : 'Add photo', 'photo', pickPhoto);
-            button(prepared.has(rec.id) ? 'Tap to send' : 'Send', 'share', shareRecord);
-            button('Delete', 'delete', deleteRecord);
-            box.appendChild(row);
-            host.appendChild(box);
-        });
+        } finally { rebuilding = false; }
         if (typing) {
-            const again = Array.from(host.querySelectorAll('.recNote')).find((n) => n.dataset.id === typing.id);
+            const again = Array.from(host.querySelectorAll('.' + typing.cls)).find((n) => n.dataset.id === typing.id);
             if (again) { again.focus(); try { again.setSelectionRange(typing.at, typing.at); } catch (e) { /* ignore */ } }
         }
     }
@@ -1149,9 +1401,10 @@
                     lat: c.latitude, lon: c.longitude, accuracyM: c.accuracy,
                     altitudeM: c.altitude, altitudeAccuracyM: c.altitudeAccuracy, time: new Date(pos.timestamp).toISOString(),
                 });
-                if (rec.sentAt && JSON.stringify(rec.location) !== JSON.stringify(before)) touched(rec);
+                const better = JSON.stringify(rec.location) !== JSON.stringify(before);
+                if (better && rec.sentAt) touched(rec);
                 if (rec.location && rec.location.accuracyM != null && rec.location.accuracyM <= 10) finish('ok');
-                else if (saved.includes(rec)) putRecord(rec).catch(() => {}).then(renderSaved);
+                else if (better && saved.includes(rec)) putRecord(rec).catch(() => {}).then(renderSaved);
             }, (err) => {
                 // code 1 = refused. Other errors may be followed by a fix, so only the timer ends those.
                 if (err && err.code === 1) finish('denied');
@@ -1169,12 +1422,14 @@
     }
     async function autoSave(interrupted) {
         if (curveState !== 'done') return;
+        // a session note finished but not yet applied counts for this measurement; one still being typed is left to its typist
+        { const a = document.activeElement; commitSessionNotes(a && a.classList && a.classList.contains('sessNote') ? a : null); }
         const d = roomDims();
         const kind = curveKind;
         const id = kind === 'sweep' ? sweepId : null;       // the same id as its checkpoint, so a recovery can never duplicate it
         if (kind === 'sweep') sweepId = null;
         const rec = R.makeRecord({
-            id, time: new Date(), kind, note: $('saveNote').value,
+            id, time: new Date(), kind, sessionNote: $('saveNote').value, sessionId: currentSessionId(), placeId: placeIdFor($('saveNote').value),
             room: { name: settings.room, lengthM: d.L, widthM: d.W, heightM: d.H },
             tempC: settings.temp, fMin: settings.fMin, fMax: settings.fMax,
             sweepDurS: settings.sweepDur, speaker: settings.speaker,
@@ -1192,7 +1447,7 @@
         saved.unshift(rec);
         unstored.add(rec);
         if (wav) memAudio.set(rec.id, wav);
-        prepared.delete('all');
+        forgetPrepared(rec);
         renderSaved();
         startLocate(rec);
         const ok = await storeRecord(rec);
@@ -1233,7 +1488,7 @@
         if (!sweepId) sweepId = R.makeRecord({ kind: 'sweep' }).id;
         try {
             localStorage.setItem(CHECKPOINT + sweepId, JSON.stringify(R.makeRecord({
-                id: sweepId, time: new Date(), kind: 'sweep', note: $('saveNote').value,
+                id: sweepId, time: new Date(), kind: 'sweep', sessionNote: $('saveNote').value, sessionId: currentSessionId(), placeId: placeIdFor($('saveNote').value),
                 room: { name: settings.room, lengthM: d.L, widthM: d.W, heightM: d.H },
                 tempC: settings.temp, fMin: settings.fMin, fMax: settings.fMax, sweepDurS: settings.sweepDur, speaker: settings.speaker,
                 curve, peaks: [], app: BUILD, locationStatus: 'unavailable', interrupted: true, disturbed,
@@ -1290,6 +1545,7 @@
     }
 
     function showRecord(rec) {
+        commitSessionNotes();
         if (voice || clapBusy) stopAll();
         viewing = rec;
         const host = $('peaks');
@@ -1392,37 +1648,63 @@
         const base = R.fileBase(rec), missing = [];
         const files = [new File([JSON.stringify(rec, null, 1)], base + '.json', { type: 'application/json' })];
         const png = await chartPng(rec);
-        if (png) files.push(new File([png], base + '-chart.png', { type: 'image/png' }));
+        if (png) files.push(new File([png], base + '_chart.png', { type: 'image/png' }));
         if (rec.photo) {
             const p = await blobOf('photos', rec);
-            if (p) files.push(new File([p], base + '-photo.jpg', { type: 'image/jpeg' })); else missing.push('the photo');
+            if (p) files.push(new File([p], base + '_photo.jpg', { type: 'image/jpeg' })); else missing.push('the photo');
         }
         if (rec.audio) {
             const a = await blobOf('audio', rec);
-            if (a) files.push(new File([a], base + '-sound.wav', { type: 'audio/wav' })); else missing.push('the sound');
+            if (a) files.push(new File([a], base + '.wav', { type: 'audio/wav' })); else missing.push('the sound');
         }
         return { files, title: 'Resonance measurement', text: R.shareText(rec), missing, recs: missing.length ? [] : [rec] };
     }
-    // Everything: one file with all spectra, plus every sound and every photo
-    async function prepareAll() {
-        const day = new Date().toISOString().slice(0, 10), list = saved.slice().reverse(), missing = [];
+    // A set of measurements as ONE zip file: a .json with all spectra and details, every sound, every photo.
+    // list: oldest first. If the phone will not share a zip, the same files go out loose; if it
+    // will not take that many, the spectra go alone and the page says so.
+    const canShareFiles = (files) => { try { return !!(navigator.share && navigator.canShare && navigator.canShare({ files })); } catch (e) { return false; } };
+    async function prepareZip(list, base) {
+        const missing = [], whole = [];
         const body = JSON.stringify(R.exportAll(list, BUILD), null, 1);
-        const json = new File([body], 'resonance-all-' + day + '.json', { type: 'application/json' });
-        const files = [json];
+        // asked before anything big is built, so that only one copy of the sounds is ever held
+        let useZip = !(navigator.share && navigator.canShare) || canShareFiles([new File([new Uint8Array(22)], 'probe.zip', { type: 'application/zip' })]);
+        let parts = [{ name: base + '.json', type: 'application/json', bytes: new TextEncoder().encode(body), time: new Date() }];
         let sounds = 0, photos = 0;
-        const whole = [];           // the records that go out complete
         for (const rec of list) {
-            const base = R.fileBase(rec);
+            const b = R.fileBase(rec), when = new Date(rec.time);
             let complete = true;
-            if (rec.audio) { const a = await blobOf('audio', rec); if (a) { files.push(new File([a], base + '-sound.wav', { type: 'audio/wav' })); sounds++; } else { complete = false; missing.push('the sound of ' + recTitle(rec)); } }
-            if (rec.photo) { const p = await blobOf('photos', rec); if (p) { files.push(new File([p], base + '-photo.jpg', { type: 'image/jpeg' })); photos++; } else { complete = false; missing.push('the photo of ' + recTitle(rec)); } }
+            if (rec.audio) {
+                const a = await blobOf('audio', rec);
+                if (a) { parts.push({ name: b + '.wav', type: 'audio/wav', bytes: new Uint8Array(a), time: when }); sounds++; }
+                else { complete = false; missing.push('the sound of ' + recTitle(rec)); }
+            }
+            if (rec.photo) {
+                const p = await blobOf('photos', rec);
+                if (p) { parts.push({ name: b + '_photo.jpg', type: 'image/jpeg', bytes: new Uint8Array(p), time: when }); photos++; }
+                else { complete = false; missing.push('the photo of ' + recTitle(rec)); }
+            }
             if (complete) whole.push(rec);
         }
-        const text = list.length + ' resonance measurements: one file with all spectra, ' + sounds + ' sound file' + (sounds === 1 ? '' : 's') + ' and ' + photos + ' photo' + (photos === 1 ? '' : 's') + '.';
-        return { files, title: 'Resonance measurements', text, missing, recs: whole,
-            // if the phone will not share that many files at once: the spectra alone, and say so plainly
-            fallback: files.length > 1 ? { files: [json], recs: list.filter((r) => !r.audio && !r.photo) } : null };
+        const count = list.length + ' resonance measurement' + (list.length === 1 ? '' : 's');
+        const holds = 'a .json file with all spectra, ' + sounds + ' sound file' + (sounds === 1 ? '' : 's') + ' and ' + photos + ' photo' + (photos === 1 ? '' : 's') + '.';
+        let whyNot = 'This phone will not share a zip file';
+        if (useZip) {
+            try {
+                const zip = new File([R.zipStore(parts)], base + '.zip', { type: 'application/zip' });
+                parts = null;       // the zip is the only copy kept from here on
+                return { files: [zip], title: 'Resonance measurements', text: count + ' in one zip: ' + holds, missing, recs: whole, fallback: null };
+            } catch (e) { useZip = false; whyNot = 'The zip file could not be built (' + (e && e.message ? e.message : 'unknown error') + ')'; }
+        }
+        const loose = parts.map((p) => new File([p.bytes], p.name, { type: p.type }));
+        parts = null;
+        const pack = { files: loose, title: 'Resonance measurements', text: count + ' as ' + loose.length + ' separate files: ' + holds, missing, recs: whole,
+            say: whyNot + ', so the ' + loose.length + ' files were offered loose instead.',
+            fallback: loose.length > 1 ? { files: [loose[0]], recs: list.filter((r) => !r.audio && !r.photo),
+                note: 'This phone will not share that many files at once, so ONLY THE SPECTRA are in this send. THE SOUNDS AND PHOTOS ARE NOT: send those measurements one at a time (More, then Send).' } : null };
+        return pack;
     }
+    const prepareAll = () => prepareZip(saved.slice().reverse(), (() => { const g = R.sessions(saved, SESSION_GAP_MIN); const last = g[g.length - 1], first = g[0];
+        return last.start.date + '_to_' + first.end.date + '_all_' + saved.length + '-measurements'; })());
 
     function download(files) {
         files.forEach((f, i) => setTimeout(() => {
@@ -1441,23 +1723,24 @@
         const secondTry = !!pack;
         if (!pack) {
             button.disabled = true;
-            try { pack = await build(); } catch (e) { savedMsg('Could not build the files: ' + (e && e.message ? e.message : 'unknown error') + '.'); button.disabled = false; return; }
+            try { const before = changeCount; pack = await build(); pack.builtAt = before; } catch (e) { savedMsg('Could not build the files: ' + (e && e.message ? e.message : 'unknown error') + '.'); button.disabled = false; return; }
             button.disabled = false;
         }
         const notes = [];
         if (pack.missing && pack.missing.length) notes.push('NOT INCLUDED, because the app could not find it in storage: ' + pack.missing.join(', ') + '.');
-        const canShare = (files) => { try { return !!(navigator.share && navigator.canShare && navigator.canShare({ files })); } catch (e) { return false; } };
+        const canShare = canShareFiles;
         const asText = (files) => files.map((f) => (f.type === 'application/json' ? new File([f], f.name + '.txt', { type: 'text/plain' }) : f));
-        let shareable = canShare(pack.files);
-        // some phones refuse .json in the share sheet: offer the same text as a .txt file
-        if (!shareable && navigator.share && canShare(asText(pack.files))) { pack = Object.assign({}, pack, { files: asText(pack.files) }); shareable = true; }
-        if (!shareable && navigator.share && pack.fallback) {
-            const small = canShare(pack.fallback.files) ? pack.fallback.files : canShare(asText(pack.fallback.files)) ? asText(pack.fallback.files) : null;
-            if (small) {
-                notes.push('This phone will not share ' + pack.files.length + ' files at once, so ONLY THE SPECTRA are in this send. THE SOUNDS AND PHOTOS ARE NOT: send those measurements one at a time.');
-                pack = Object.assign({}, pack, { files: small, recs: pack.fallback.recs, fallback: null });
-                shareable = true;
-            }
+        // the pack itself, then what it falls back to: the first one this phone will share is used, and the page says which
+        let shareable = false;
+        for (let option = pack, depth = 0; option && depth < 4; option = option.fallback, depth++) {
+            // some phones refuse .json in the share sheet: the same text as a .txt file is tried too
+            const files = canShare(option.files) ? option.files : (navigator.share && canShare(asText(option.files)) ? asText(option.files) : null);
+            if (!files) continue;
+            if (depth && option.note) notes.push(option.note);
+            if (!depth && option.say) notes.push(option.say);
+            pack = Object.assign({}, pack, { files, recs: option.recs, fallback: null });
+            shareable = true;
+            break;
         }
         if (!shareable) {
             download(pack.files);
@@ -1470,7 +1753,9 @@
             button.textContent = idleLabel;
             // remember what has left the phone, so it is plain what has no copy elsewhere yet
             const now = new Date().toISOString();
-            (pack.recs || []).forEach((r) => { if (saved.includes(r)) { r.sentAt = now; putRecord(r).catch(() => {}); } });
+            // ... but not a record that changed after these files were built: what left the phone is its older state
+            (pack.recs || []).filter((r) => saved.includes(r) && (changedAt.get(r.id) || 0) <= (pack.builtAt == null ? Infinity : pack.builtAt))
+                .forEach((r) => { r.sentAt = now; const keep = changedAt.get(r.id); putRecord(r).catch(() => {}); if (keep == null) changedAt.delete(r.id); else changedAt.set(r.id, keep); });
             renderSaved();
             savedMsg(notes.join(' '));
         } catch (e) {
@@ -1478,14 +1763,15 @@
             if (secondTry) {
                 prepared.delete(key);
                 button.textContent = idleLabel;
-                savedMsg('The phone refused to share these files (' + (e && e.message ? e.message : 'no reason given') + '). Nothing was sent and nothing was removed.' + (key === 'all' ? ' Try sending the measurements one at a time.' : ''));
+                savedMsg('The phone refused to share these files (' + (e && e.message ? e.message : 'no reason given') + '). Nothing was sent and nothing was removed.' + (key === 'all' || String(key).indexOf('session:') === 0 ? ' Try sending the measurements one at a time (More, then Send).' : ''));
                 return;
             }
-            prepared.set(key, pack);
-            button.textContent = 'Tap to send';
+            // kept for the second tap only if nothing has changed since it was built
+            if (pack.builtAt === changeCount) { prepared.set(key, pack); button.textContent = 'Tap to send'; }
+            else { button.textContent = idleLabel; savedMsg('Something changed while the files were being built. Tap once more to send the current state.'); }
         }
     }
-    const shareRecord = (rec, button) => send(rec.id, () => prepareRecord(rec), button, 'Send');
+    const shareRecord = (rec, button) => { commitSessionNotes(); return send(rec.id, () => prepareRecord(rec), button, 'Send'); };
 
     function deleteRecord(rec, button) {
         if (button.dataset.armed !== '1') {
@@ -1503,7 +1789,7 @@
                 unstored.delete(rec); memAudio.delete(rec.id);
                 tabMarks();
                 saved = saved.filter((r) => r !== rec);
-                prepared.delete(rec.id); prepared.delete('all');
+                forgetPrepared(rec);
                 if (thumbs.has(rec.id)) { URL.revokeObjectURL(thumbs.get(rec.id)); thumbs.delete(rec.id); }
                 if (viewing === rec) { viewing = null; $('peaks').textContent = ''; drawChart(); }
                 renderSaved();
@@ -1528,6 +1814,12 @@
             });
             saved = saved.concat(fromDisk).sort((a, b) => (a.time < b.time ? 1 : -1));
             if (loadFailed) { loadFailed = false; storageWarn = ''; savedMsg(''); tabMarks(); }
+            const adopted = adoptOldRecords(saved);
+            adopted.forEach((r) => { putRecord(r).catch(() => {}); });
+            if (adoptOldRecords.moved) {
+                savedMsg('Measurements from before this version were grouped into sessions. Where every measurement of a session carried the same note, that note is now the session\'s note (' + adoptOldRecords.moved + ' measurements). Nothing was removed.');
+                adoptOldRecords.moved = 0;
+            }
         } catch (e) {
             dropDb();
             loadFailed = true;      // tried again every 15 s and whenever the app is returned to
@@ -1538,7 +1830,7 @@
         }
         renderSaved();
         if (saved.length) askPersist();
-        if (!loadFailed) recoverCheckpoints();
+        if (!loadFailed) { recoverDraft(); recoverCheckpoints(); }
     }
 
     // ---------- Tabs ----------
@@ -1546,6 +1838,7 @@
     // so it works the same with no network. Sound and microphone keep running across tabs.
     function showTab(name, byUser) {
         if (!CHOICES.tab.includes(name)) name = DEFAULTS.tab;
+        if (byUser) commitSessionNotes();
         const changed = settings.tab !== name;
         if (byUser && !changed) return;     // tapping the open tab again must not disturb anything on it
         settings.tab = name;
@@ -1714,10 +2007,11 @@
     $('saveNote').addEventListener('change', noteTyped);
     const again = () => { if (loadFailed) loadSaved().then(retryUnstored); else retryUnstored(); };
     setInterval(again, 15000);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) again(); });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) commitSessionNotes(); else again(); });
+    window.addEventListener('pagehide', () => { commitSessionNotes(); });
     $('openSaved').addEventListener('click', () => showTab('saved', true));
     $('photoInput').addEventListener('change', photoChosen);
-    $('shareAll').addEventListener('click', () => send('all', async () => prepareAll(), $('shareAll'), 'Send all: spectra, sounds, photos'));
+    $('shareAll').addEventListener('click', () => { commitSessionNotes(); send('all', async () => prepareAll(), $('shareAll'), 'Send everything as one zip'); });
 
     // A hidden page cannot be trusted to keep playing: stop, so the screen never lies
     document.addEventListener('visibilitychange', () => {
@@ -1751,7 +2045,7 @@
     if (updater) updater.busy = () => {
         const a = document.activeElement;
         const typing = !!a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && (a.type === 'text' || a.type === 'number')));
-        return !!(voice || micOn || clapBusy || recording || curveState === 'done' || unstored.size || pendingWrites || locating || photoBusy || noteTimers.size || typing);
+        return !!(voice || micOn || clapBusy || recording || curveState === 'done' || unstored.size || pendingWrites || locating || photoBusy || noteTimers.size || typing || uncommittedNotes());
     };
     syncInputs();
     if (!recompute()) {
