@@ -748,22 +748,41 @@ async def main():
         read = """new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll();
             g.onsuccess = () => { q.result.close(); done(Object.fromEntries(g.result.map(r => [r.id.slice(-4), [r.sessionNote, r.placeId]]))); }; }; })"""
         before = await page.evaluate(read)
-        # typed key by key, passing through "Beta" on the way: the Beta measurement must not be swept along
+        await page.evaluate(SHARE_MOCK)
+        # typed key by key, passing through "Beta" on the way, with the list rebuilt under the cursor and Enter pressed half way:
+        # the Beta measurement must not be swept along, and nothing typed may be dropped
         await page.click('#savedList .session:first-child .sessNote')
         for _ in range(5): await page.keyboard.press('Backspace')
         await page.keyboard.type('Beta', delay=40)
-        await page.evaluate("document.querySelector('#savedList [data-role=location]') && window.dispatchEvent(new Event('resize'))")
+        await page.evaluate("document.querySelector('#savedList .session:last-child [data-role=share]').click()")      # a send elsewhere rebuilds the list when it is done
+        await page.wait_for_function("window.__shares.length === 1", timeout=8000); await page.wait_for_timeout(500)
+        check(await page.evaluate("document.activeElement.classList.contains('sessNote') && document.activeElement.value") == 'Beta' and (await page.evaluate(read))['eeee'][0] == 'Alpha',
+              'a session note being typed survives the list being rebuilt, and is not written half way', await page.evaluate("document.activeElement.className + ' ' + document.activeElement.value"))
         await page.keyboard.type('max', delay=40)
+        await page.keyboard.press('Enter'); await page.wait_for_timeout(500)
+        await page.keyboard.type('2', delay=40)
         await page.keyboard.press('Tab'); await page.wait_for_timeout(900)
         after = await page.evaluate(read)
-        check(after['eeee'][0] == 'Betamax' and after['ffff'][0] == 'Betamax' and after['gggg'] == before['gggg'], 'a session note typed letter by letter changes only the measurements that had the old note', after)
+        check(after['eeee'][0] == 'Betamax2' and after['ffff'][0] == 'Betamax2' and after['gggg'] == before['gggg'], 'a session note changes only the measurements that had the old note, and typing on after Enter is kept', after)
         check(after['eeee'][1] == before['eeee'][1] and after['eeee'][1] == after['ffff'][1] and after['eeee'][1] != after['gggg'][1], 'a place that is renamed keeps its identifier', after)
-        # another session is given the name of an existing place: it becomes that place
+        # focusing a session note and leaving it unchanged changes nothing (the measurement here was just sent)
+        sentmark = await page.evaluate("document.querySelector('#savedList .session:last-child .sessInfo').textContent")
+        await page.click('#savedList .session:last-child .sessNote'); await page.keyboard.press('Tab'); await page.wait_for_timeout(500)
+        check(await page.evaluate("document.querySelector('#savedList .session:last-child .sessInfo').textContent") == sentmark and (await page.evaluate(read))['aaaa'] == before['aaaa'], 'entering and leaving a session note without typing changes nothing', sentmark)
+        # a chain of renames: the place keeps its identity, and its old names are free for other places
         last = '#savedList .session:last-child .sessNote'
-        await page.fill(last, 'Betamax'); await page.dispatch_event(last, 'change'); await page.wait_for_timeout(900)
+        for name in ('Attic', 'Roof'):
+            await page.fill(last, name); await page.dispatch_event(last, 'change'); await page.wait_for_timeout(600)
+        mid = '#savedList .session:nth-child(2) .sessNote'
+        await page.fill(mid, 'Attic'); await page.dispatch_event(mid, 'change'); await page.wait_for_timeout(600)
         after = await page.evaluate(read)
-        check(after['aaaa'][0] == 'Betamax' and after['aaaa'][1] == after['eeee'][1] and after['bbbb'][1] == after['eeee'][1], 'a session renamed to an existing place takes that place\'s identifier', after)
-        await page.evaluate(SHARE_MOCK)
+        check(after['aaaa'][0] == 'Roof' and after['aaaa'][1] == before['aaaa'][1] and after['dddd'][0] == 'Attic' and after['dddd'][1] and after['dddd'][1] != after['aaaa'][1] and after['cccc'][1] == after['dddd'][1],
+              'after a place is renamed twice, another place given its old name gets an identifier of its own', after)
+        # another session is given the name of an existing place: it becomes that place
+        await page.fill(last, 'Betamax2'); await page.dispatch_event(last, 'change'); await page.wait_for_timeout(900)
+        after = await page.evaluate(read)
+        check(after['aaaa'][0] == 'Betamax2' and after['aaaa'][1] == after['eeee'][1] and after['bbbb'][1] == after['eeee'][1], 'a session renamed to an existing place takes that place\'s identifier', after)
+        await page.evaluate("window.__shares = []")
         await page.click('#shareAll'); await page.wait_for_timeout(700)
         sent = await page.evaluate("window.__shares")
         check(len(sent) == 1 and sent[0]['files'][0]['name'] == '2026-11-19_to_2026-11-21_all_7-measurements.zip' and len(zipfile.ZipFile(io.BytesIO(base64.b64decode(sent[0]['files'][0]['b64']))).namelist()) == 1, '"Send everything" is one zip named by its dates', [f['name'] for f in sent[0]['files']] if sent else sent)

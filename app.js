@@ -951,8 +951,11 @@
     // Any change to a record after it was sent means the copy outside the phone is out of date
     // Files built for a send that waits for its second tap are out of date as soon as anything changes:
     // the record's own, the "everything" zip, and every session zip.
+    let changeCount = 0;            // goes up with every change to any record
+    const changedAt = new Map();    // record id -> changeCount at its last change
     function forgetPrepared(rec) {
-        if (rec) prepared.delete(rec.id);
+        changeCount++;
+        if (rec) { prepared.delete(rec.id); changedAt.set(rec.id, changeCount); }
         Array.from(prepared.keys()).forEach((k) => { if (k === 'all' || String(k).indexOf('session:') === 0) prepared.delete(k); });
     }
     function touched(rec) { rec.sentAt = null; forgetPrepared(rec); }
@@ -1065,7 +1068,11 @@
         if (known) return known.placeId;
         // a place that is only being renamed (nothing else uses its id) keeps its identity
         const own = Array.from(new Set(Array.from(skip).map((r) => r.placeId).filter(Boolean)));
-        if (own.length === 1 && !saved.some((r) => !skip.has(r) && r.placeId === own[0])) { newPlaces.set(key, own[0]); return own[0]; }
+        if (own.length === 1 && !saved.some((r) => !skip.has(r) && r.placeId === own[0])) {
+            Array.from(newPlaces.keys()).forEach((k) => { if (newPlaces.get(k) === own[0]) newPlaces.delete(k); });    // its earlier names no longer mean this place
+            newPlaces.set(key, own[0]);
+            return own[0];
+        }
         if (!newPlaces.has(key)) newPlaces.set(key, R.uuid());
         return newPlaces.get(key);
     }
@@ -1107,15 +1114,53 @@
         places.textContent = '';
         placeNames().forEach((n) => { const o = document.createElement('option'); o.value = n; places.appendChild(o); });
     }
+    // A session note is applied when its field is left (or Enter is pressed), in one step:
+    // was = the note the field showed when it was drawn. The measurements that carried that note, and those
+    // with none, get the new text; a measurement with a different note of its own was set on purpose and is left alone.
+    function applySessionNote(key, was, text) {
+        text = String(text || '').trim().slice(0, 200);
+        if (text === String(was || '').trim()) return false;            // nothing was changed: nothing is touched
+        const sess = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === key);
+        if (!sess) return false;
+        const old = placeKey(was);
+        const targets = new Set(sess.records.filter((r) => placeKey(r.sessionNote) === old || !placeKey(r.sessionNote)));
+        const pid = placeIdFor(text, targets);      // the same name is the same place; a mere rename keeps the identity
+        targets.forEach((r) => {
+            if ((r.sessionNote || '') === text && (r.placeId || null) === (pid || null)) return;
+            r.sessionNote = text;
+            r.placeId = pid || null;
+            touched(r);
+            putRecord(r).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.'));
+        });
+        // The session being measured right now: its note also goes with the next measurements,
+        // unless something else has been typed under the chart for them meanwhile.
+        const live = saved[0] && sess.records[0] === saved[0] && Date.now() - new Date(saved[0].time).getTime() <= SESSION_GAP_MIN * 60000;
+        if (live && placeKey($('saveNote').value) === old) { $('saveNote').value = text; noteTyped(); }
+        return true;
+    }
+    // Finishes every session note that has been typed but not applied yet. Called before anything that
+    // depends on the notes: a rebuild of the list, a send, a new measurement, leaving the tab or the app.
+    function commitSessionNotes(except) {
+        let changed = false;
+        document.querySelectorAll('#savedList .sessNote').forEach((input) => {
+            if (input === except) return;
+            const was = input.dataset.was || '';
+            if (applySessionNote(input.dataset.id, was, input.value)) { changed = true; input.dataset.was = input.value.trim().slice(0, 200); }
+        });
+        return changed;
+    }
     const dateFi = (p) => { const d = p.date.split('-'); return Number(d[2]) + '.' + Number(d[1]) + '.' + d[0]; };
     const openRecs = new Set();     // records whose extra lines (location, photo, buttons) are unfolded
-    let sessEdit = null;            // the session note being typed: { key, value, ids of the records it applies to }
+    let rebuilding = false;
     function renderSaved() {
         const host = $('savedList');
         // the list is rebuilt while a note may be being typed (a location arrives): keep the cursor where it was
         const active = document.activeElement;
         const typing = active && active.classList && (active.classList.contains('recNote') || active.classList.contains('sessNote'))
-            ? { cls: active.classList.contains('recNote') ? 'recNote' : 'sessNote', id: active.dataset.id, at: active.selectionStart } : null;
+            ? { cls: active.classList.contains('recNote') ? 'recNote' : 'sessNote', id: active.dataset.id, at: active.selectionStart, value: active.value, was: active.dataset.was || '' } : null;
+        // session notes typed but not yet applied are applied now, except the one still being typed, which is carried over as it is
+        commitSessionNotes(typing && typing.cls === 'sessNote' ? active : null);
+        rebuilding = true;      // fields removed from the page fire 'change' and 'blur' in some browsers: those are not the user's
         host.textContent = '';
         $('savedEmpty').hidden = saved.length > 0;
         summaries();
@@ -1157,52 +1202,25 @@
             sNote.placeholder = 'Place or note for this whole session'; sNote.value = sess.note; sNote.dataset.id = sess.key;
             sNote.setAttribute('list', 'placeList');
             sNote.setAttribute('aria-label', 'Note for the session of ' + dateFi(sess.start) + ' ' + sess.start.time);
-            // Typing here changes the measurements that carried the session's note when the field was entered
-            // (and those with none). A measurement with a different note of its own was set on purpose: left alone.
-            // The set is fixed for the whole edit and survives the list being rebuilt meanwhile.
-            const edit = sessEdit && sessEdit.key === sess.key ? sessEdit : null;
-            if (edit) sNote.value = edit.value;
-            const begin = () => {
-                if (sessEdit && sessEdit.key === sess.key) return sessEdit;
-                const was = placeKey(sNote.value);
-                sessEdit = { key: sess.key, value: sNote.value, ids: new Set(sess.records.filter((r) => placeKey(r.sessionNote) === was || !placeKey(r.sessionNote)).map((r) => r.id)) };
-                return sessEdit;
+            sNote.dataset.was = sess.note;
+            if (typing && typing.cls === 'sessNote' && typing.id === sess.key) { sNote.value = typing.value; sNote.dataset.was = typing.was; }
+            const finish = () => {
+                if (rebuilding || !sNote.isConnected) return;
+                if (commitSessionNotes()) renderSaved();
             };
-            const applySession = (text, final) => {
-                const state = begin();
-                state.value = text;
-                const targets = new Set(sess.records.filter((r) => state.ids.has(r.id)));
-                // the place identity is decided once, when the typing is done: the same name is the same place
-                const pid = final ? placeIdFor(text, targets) : undefined;
-                targets.forEach((r) => {
-                    const samePlace = pid === undefined || (r.placeId || null) === (pid || null);
-                    if ((r.sessionNote || '') === text && samePlace) return;                       // nothing new for this one
-                    r.sessionNote = text;
-                    if (pid !== undefined) r.placeId = pid || null;
-                    touched(r);
-                    clearTimeout(noteTimers.get(r.id));
-                    const write = () => { noteTimers.delete(r.id); putRecord(r).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.')); };
-                    if (final) write(); else noteTimers.set(r.id, setTimeout(write, 400));
-                });
-                sess.note = text;
-                // a session still being measured: what is typed here also goes with its next measurements
-                if (groups[0] === sess && Date.now() - new Date(sess.records[0].time).getTime() <= SESSION_GAP_MIN * 60000) { $('saveNote').value = text; noteTyped(); }
-                if (final) { sessEdit = null; refreshPlaces(); }
-                describe();
-                summaries();
-            };
-            sNote.addEventListener('focus', begin);
-            sNote.addEventListener('input', () => applySession(sNote.value.slice(0, 200), false));
-            // 'change' does not always come (the field can be rebuilt under the cursor), so leaving the field finishes the edit too
-            const done = () => { if (sessEdit && sessEdit.key === sess.key) applySession(sNote.value.trim().slice(0, 200), true); };
-            sNote.addEventListener('change', done);
-            sNote.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== sNote && !(document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('sessNote') && document.activeElement.dataset.id === sess.key)) done(); }, 0));
+            sNote.addEventListener('change', finish);
+            // 'change' does not always come on a phone, so leaving the field finishes the edit too
+            sNote.addEventListener('blur', () => setTimeout(finish, 0));
             card.appendChild(sNote);
             const sRow = el('div', null, 'row mt');
             const sKey = 'session:' + sess.key;
             const sendB = el('button', prepared.has(sKey) ? 'Tap to send' : 'Send session as one zip', 'ghost');
             sendB.type = 'button'; sendB.dataset.role = 'shareSession';
-            sendB.addEventListener('click', () => send(sKey, () => prepareZip(sess.records.slice().reverse(), sess.fileBase), sendB, 'Send session as one zip'));
+            sendB.addEventListener('click', () => {
+                commitSessionNotes();       // a note typed a moment ago belongs in what is sent
+                // the session as it is now, not as it was when this button was drawn
+                send(sKey, () => { const now = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === sess.key) || sess; return prepareZip(now.records.slice().reverse(), now.fileBase); }, sendB, 'Send session as one zip');
+            });
             sRow.appendChild(sendB);
             card.appendChild(sRow);
             const list = el('div', null, 'recs');
@@ -1234,6 +1252,7 @@
                     noteTimers.set(rec.id, setTimeout(writeNote, 400));
                 });
                 note.addEventListener('change', () => {
+                    if (rebuilding || !note.isConnected) return;     // the list was rebuilt under the cursor: the typing goes on in the new field
                     const text = note.value.trim().slice(0, 200);
                     if (text !== rec.note) { rec.note = text; touched(rec); }
                     marks();
@@ -1279,6 +1298,7 @@
             card.appendChild(list);
             host.appendChild(card);
         });
+        rebuilding = false;
         if (typing) {
             const again = Array.from(host.querySelectorAll('.' + typing.cls)).find((n) => n.dataset.id === typing.id);
             if (again) { again.focus(); try { again.setSelectionRange(typing.at, typing.at); } catch (e) { /* ignore */ } }
@@ -1338,6 +1358,7 @@
     }
     async function autoSave(interrupted) {
         if (curveState !== 'done') return;
+        commitSessionNotes();       // a session note still in its field counts for this measurement
         const d = roomDims();
         const kind = curveKind;
         const id = kind === 'sweep' ? sweepId : null;       // the same id as its checkpoint, so a recovery can never duplicate it
@@ -1580,7 +1601,7 @@
         const missing = [], whole = [];
         const body = JSON.stringify(R.exportAll(list, BUILD), null, 1);
         // asked before anything big is built, so that only one copy of the sounds is ever held
-        let useZip = !navigator.share || canShareFiles([new File([new Uint8Array(22)], 'probe.zip', { type: 'application/zip' })]);
+        let useZip = !(navigator.share && navigator.canShare) || canShareFiles([new File([new Uint8Array(22)], 'probe.zip', { type: 'application/zip' })]);
         let parts = [{ name: base + '.json', type: 'application/json', bytes: new TextEncoder().encode(body), time: new Date() }];
         let sounds = 0, photos = 0;
         for (const rec of list) {
@@ -1636,7 +1657,7 @@
         const secondTry = !!pack;
         if (!pack) {
             button.disabled = true;
-            try { pack = await build(); } catch (e) { savedMsg('Could not build the files: ' + (e && e.message ? e.message : 'unknown error') + '.'); button.disabled = false; return; }
+            try { const before = changeCount; pack = await build(); pack.builtAt = before; } catch (e) { savedMsg('Could not build the files: ' + (e && e.message ? e.message : 'unknown error') + '.'); button.disabled = false; return; }
             button.disabled = false;
         }
         const notes = [];
@@ -1666,7 +1687,9 @@
             button.textContent = idleLabel;
             // remember what has left the phone, so it is plain what has no copy elsewhere yet
             const now = new Date().toISOString();
-            (pack.recs || []).forEach((r) => { if (saved.includes(r)) { r.sentAt = now; putRecord(r).catch(() => {}); } });
+            // ... but not a record that changed after these files were built: what left the phone is its older state
+            (pack.recs || []).filter((r) => saved.includes(r) && (changedAt.get(r.id) || 0) <= (pack.builtAt == null ? Infinity : pack.builtAt))
+                .forEach((r) => { r.sentAt = now; const keep = changedAt.get(r.id); putRecord(r).catch(() => {}); if (keep == null) changedAt.delete(r.id); else changedAt.set(r.id, keep); });
             renderSaved();
             savedMsg(notes.join(' '));
         } catch (e) {
@@ -1677,8 +1700,9 @@
                 savedMsg('The phone refused to share these files (' + (e && e.message ? e.message : 'no reason given') + '). Nothing was sent and nothing was removed.' + (key === 'all' || String(key).indexOf('session:') === 0 ? ' Try sending the measurements one at a time (More, then Send).' : ''));
                 return;
             }
-            prepared.set(key, pack);
-            button.textContent = 'Tap to send';
+            // kept for the second tap only if nothing has changed since it was built
+            if (pack.builtAt === changeCount) { prepared.set(key, pack); button.textContent = 'Tap to send'; }
+            else { button.textContent = idleLabel; savedMsg('Something changed while the files were being built. Tap once more to send the current state.'); }
         }
     }
     const shareRecord = (rec, button) => send(rec.id, () => prepareRecord(rec), button, 'Send');
@@ -1723,13 +1747,13 @@
                 if (r.audioPending && sounds.has(r.id)) { r.audio = r.audioPending; r.audioMissing = false; delete r.audioPending; putRecord(r).catch(() => {}); }
             });
             saved = saved.concat(fromDisk).sort((a, b) => (a.time < b.time ? 1 : -1));
+            if (loadFailed) { loadFailed = false; storageWarn = ''; savedMsg(''); tabMarks(); }
             const adopted = adoptOldRecords(saved);
             adopted.forEach((r) => { putRecord(r).catch(() => {}); });
             if (adoptOldRecords.moved) {
                 savedMsg('Measurements from before this version were grouped into sessions. Where every measurement of a session carried the same note, that note is now the session\'s note (' + adoptOldRecords.moved + ' measurements). Nothing was removed.');
                 adoptOldRecords.moved = 0;
             }
-            if (loadFailed) { loadFailed = false; storageWarn = ''; savedMsg(''); tabMarks(); }
         } catch (e) {
             dropDb();
             loadFailed = true;      // tried again every 15 s and whenever the app is returned to
@@ -1748,6 +1772,7 @@
     // so it works the same with no network. Sound and microphone keep running across tabs.
     function showTab(name, byUser) {
         if (!CHOICES.tab.includes(name)) name = DEFAULTS.tab;
+        if (byUser && commitSessionNotes()) renderSaved();
         const changed = settings.tab !== name;
         if (byUser && !changed) return;     // tapping the open tab again must not disturb anything on it
         settings.tab = name;
@@ -1916,10 +1941,11 @@
     $('saveNote').addEventListener('change', noteTyped);
     const again = () => { if (loadFailed) loadSaved().then(retryUnstored); else retryUnstored(); };
     setInterval(again, 15000);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) again(); });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) { if (commitSessionNotes()) renderSaved(); } else again(); });
+    window.addEventListener('pagehide', () => { commitSessionNotes(); });
     $('openSaved').addEventListener('click', () => showTab('saved', true));
     $('photoInput').addEventListener('change', photoChosen);
-    $('shareAll').addEventListener('click', () => send('all', async () => prepareAll(), $('shareAll'), 'Send everything as one zip'));
+    $('shareAll').addEventListener('click', () => { commitSessionNotes(); send('all', async () => prepareAll(), $('shareAll'), 'Send everything as one zip'); });
 
     // A hidden page cannot be trusted to keep playing: stop, so the screen never lies
     document.addEventListener('visibilitychange', () => {
