@@ -649,7 +649,15 @@ async def main():
 
         # a clap cut short keeps what was recorded
         page, errors = await new_page(browser, url)
+        spot = "JSON.stringify(['sweep', 'chart'].map(id => Math.round(document.getElementById(id).getBoundingClientRect().top)))"
+        check(await page.evaluate("motionAsk2.disabled && motionLine2.textContent.includes('once the microphone is on')"), 'before the microphone is on, the phone-position button is not offered')
         await page.click('#mic'); await page.wait_for_timeout(900)
+        y1 = await page.evaluate(spot)
+        check(await page.evaluate("!motionAsk2.disabled && motionAsk2.style.visibility === 'visible'"), 'the phone-position button is there as soon as the microphone is on')
+        await page.click('#motionAsk2'); await page.wait_for_timeout(300)
+        await page.evaluate("window.dispatchEvent(new DeviceMotionEvent('devicemotion', { accelerationIncludingGravity: { x: 0, y: 0, z: 9.81 }, acceleration: { x: 0, y: 0, z: 0 }, rotationRate: { alpha: 0, beta: 0, gamma: 0 }, interval: 20 }))")
+        await page.wait_for_timeout(300)
+        check(await page.evaluate("motionAsk2.disabled && motionLine2.textContent.includes('noted with each measurement')") and await page.evaluate(spot) == y1, 'when the sensor comes on, the button goes and nothing on the page moves', y1 + ' -> ' + await page.evaluate(spot))
         await page.click('#clap')
         waited = 0
         while waited < 12000:
@@ -853,14 +861,14 @@ async def main():
               and await page.evaluate("saveNote.value") == 'Other place cellar', 'and that clap gets the finished note, in the same session and place as the others', notes)
 
         # ---- the motion sensor: how the phone lay, and whether it was moved since the previous measurement
-        check('not being noted' in await page.evaluate("motionLine.textContent") and await page.evaluate("!motionAsk2.hidden && motionAsk2.closest('.tab').id") == 'tab-measure' and await page.evaluate("document.querySelector('#savedList .rec').textContent.includes('Phone:')") is False,
+        check('not being noted' in await page.evaluate("motionLine.textContent") and await page.evaluate("!motionAsk2.disabled && motionAsk2.style.visibility === 'visible' && motionAsk2.closest('.tab').id") == 'tab-measure' and await page.evaluate("document.querySelector('#savedList .rec').textContent.includes('Phone:')") is False,
               'the motion sensor is never asked for by itself: a button beside the microphone offers it, and measurements are saved as before without it', await page.evaluate("motionLine.textContent"))
         await page.click('#motionAsk2')
         # a phone lying flat that reports 50 times a second
         await page.evaluate("""(() => { window.__g = [0, 0, 9.81]; window.__rot = 0;
             window.__sensor = setInterval(() => window.dispatchEvent(new DeviceMotionEvent('devicemotion', { accelerationIncludingGravity: { x: window.__g[0], y: window.__g[1], z: window.__g[2] },
                 acceleration: { x: 0, y: 0, z: 0 }, rotationRate: { alpha: window.__rot, beta: 0, gamma: 0 }, interval: 20 })), 20); })()""")
-        await page.wait_for_function("motionLine.textContent.startsWith('Phone position: on') && motionAsk2.hidden", timeout=4000)
+        await page.wait_for_function("motionLine.textContent.startsWith('Phone position: on') && motionAsk2.disabled && motionAsk2.style.visibility === 'hidden'", timeout=4000)
         n0 = await page.evaluate("document.querySelectorAll('#savedList .rec').length")
         await page.click('#clap')
         waited = 0

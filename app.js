@@ -538,11 +538,12 @@
         const moving = rot > 25 || lin > 1.2;       // clearly being handled, not just resting
         // what counts is the longest unbroken stretch of motion: taps on the screen are many short ones
         motion.run = moving ? motion.run + dt : 0;
+        if (!moving) motion.run0 = 0;
         if (motion.measuring) {
             motion.n++;
             motion.g[0] += g[0]; motion.g[1] += g[1]; motion.g[2] += g[2];
             motion.lin2 += lin * lin; motion.rot2 += rot * rot;
-            if (now >= motion.skipUntil && motion.run > motion.duringMs) motion.duringMs = motion.run;
+            if (now >= motion.skipUntil && motion.run - (motion.run0 || 0) > motion.duringMs) motion.duringMs = motion.run - (motion.run0 || 0);
         } else if (motion.run > motion.betweenMs) motion.betweenMs = motion.run;
     }
     function onHeading(e) {
@@ -558,14 +559,20 @@
         const line = document.getElementById('motionLine'), line2 = document.getElementById('motionLine2');
         const ask = document.getElementById('motionAsk'), ask2 = document.getElementById('motionAsk2');
         if (line) line.textContent = text;
-        if (line2) line2.textContent = motion.status === 'on' ? '' : text;
+        // beside the microphone: one short line and a button that keep their place whether shown or not, so nothing below jumps
+        if (line2) line2.textContent = { off: micOn ? 'Phone position: not being noted.' : 'Phone position: can be noted once the microphone is on.', asking: 'Phone position: waiting for your answer…',
+            on: 'Phone position: noted with each measurement.', denied: 'Phone position: sensor not allowed (see Setup).', none: 'Phone position: no motion sensor here.' }[motion.status];
         const done = motion.status === 'on' || motion.status === 'none' || motion.status === 'asking';
         if (ask) ask.hidden = done;
-        if (ask2) ask2.hidden = done || !micOn;     // offered beside the microphone once that is on, never in the same tap
+        if (ask2) {     // offered beside the microphone once that is on, never in the same tap
+            const show = !done && micOn;
+            ask2.style.visibility = show ? 'visible' : 'hidden';
+            ask2.disabled = !show;
+        }
     }
     // Must be called straight from a tap: an iPhone only shows its permission question then.
     function motionEnable() {
-        if (motion.listening || motion.status === 'asking') return;
+        if (motion.status === 'asking' || (motion.listening && motion.status !== 'denied')) return;     // after a refusal the question can be put again
         const listen = () => {
             if (motion.listening) return;
             motion.listening = true;
@@ -594,6 +601,7 @@
     function motionBegin(skipMs) {
         if (motion.measuring && motion.duringMs > motion.betweenMs) motion.betweenMs = motion.duringMs;    // one that ended without being saved
         motion.measuring = true;
+        motion.run0 = motion.run;       // handling that began before this measurement is not "during" it
         motion.skipUntil = performance.now() + (skipMs || 0);
         motion.n = 0; motion.g = [0, 0, 0]; motion.lin2 = 0; motion.rot2 = 0; motion.duringMs = 0;
         motion.t0 = performance.now();
@@ -648,6 +656,8 @@
             startTap(micSource).catch(() => {}).then(() => { if (micStream === stream && !tap) $('micWarn').textContent = 'This phone is not giving the app the raw sound right now: claps will be saved WITHOUT their sound. Turn the microphone off and on to try again.'; });
             stream.getTracks().forEach((t) => { t.onended = () => { if (micStream === stream) micOff('The microphone was taken away by the system.'); }; });
             micOn = true;
+            // the phone-position extra: where no question has to be asked it simply starts; otherwise its button is shown now
+            try { if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission !== 'function') motionEnable(); motionLine(); } catch (e) { /* an extra */ }
             $('mic').textContent = 'Turn microphone off';
             $('mic').classList.add('on');
             meterTimer = setInterval(meterTick, 100);
