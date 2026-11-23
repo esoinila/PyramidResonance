@@ -79,6 +79,12 @@ def use_tabs(page):
         tab = await page.evaluate("""(sel) => { const el = document.querySelector(sel); const panel = el && el.closest('.tab');
             return panel && panel.hidden ? 'tabBtn-' + panel.id.slice(4) : ''; }""", selector)
         if tab: await real_click('#' + tab)      # a real tap: fails if the tab button is covered or missing
+        # the buttons of one saved measurement are folded away behind its "More" button
+        fold = await page.evaluate("""(sel) => { const el = document.querySelector(sel); const more = el && el.closest('.more');
+            if (!more || !more.hidden) return ''; const rec = more.closest('.rec'); rec.setAttribute('data-unfold', '1'); return rec.dataset.id; }""", selector)
+        if fold:
+            await real_click('.rec[data-unfold="1"] [data-role=more]')
+            await page.evaluate("document.querySelectorAll('.rec[data-unfold]').forEach(r => r.removeAttribute('data-unfold'))")
     real_click = page.click
     def wrap(name):
         real = getattr(page, name)
@@ -118,6 +124,7 @@ navigator.share = async (d) => {
   const files = [];
   for (const f of d.files) {
     const o = { name: f.name, type: f.type, size: f.size, text: f.type === 'application/json' ? await f.text() : null };
+    if (f.type === 'application/zip') { const a = new Uint8Array(await f.arrayBuffer()); let s = ''; for (let i = 0; i < a.length; i += 8192) s += String.fromCharCode.apply(null, a.subarray(i, i + 8192)); o.b64 = btoa(s); }
     if (f.type === 'audio/wav') {
       const v = new DataView(await f.arrayBuffer());
       const x = new Float32Array((v.byteLength - 58) / 4); for (let i = 0; i < x.length; i++) x[i] = v.getFloat32(58 + i * 4, true);
@@ -407,19 +414,20 @@ async def main():
         await page.fill('#saveNote', 'Next room')
         check(await page.evaluate("localStorage.getItem('pyramid-res-note')") == 'Next room', 'the note for the next measurements is kept as it is typed, without leaving the field')
         await page.dispatch_event('#saveNote', 'change'); await page.wait_for_timeout(700)
-        check('Next room' not in await page.evaluate("document.querySelector('#savedList .rec b').textContent"), 'and it does not rename a measurement that is already saved')
-        await page.fill('#saveNote', 'Test room, niche 3')
+        check('Next room' not in await page.evaluate("document.querySelector('#savedList .session').textContent + document.querySelector('#savedList .rec .recNote').value + document.querySelector('#savedList .sessNote').value"), 'and it does not rename a measurement that is already saved')
+        await page.fill('#saveNote', '')
         # each saved measurement has its own note
         await page.fill('#savedList .rec .recNote', 'Test room, niche 3'); await page.wait_for_timeout(900)
-        check(await page.evaluate("document.activeElement.classList.contains('recNote')") and 'niche 3' in await page.evaluate("document.querySelector('#savedList .rec b').textContent"),
-              'a saved measurement has its own note field, stored as it is typed')
+        check(await page.evaluate("document.activeElement.classList.contains('recNote')") and 'niche 3' in await page.evaluate("document.querySelector('#savedList .rec .recNote').value"),
+              'a saved measurement has its own one-line note, stored as it is typed')
         check('not sent yet' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent") and 'not sent yet' in await page.evaluate("savedSummary.textContent") and 'home screen' in await page.evaluate("document.getElementById('tab-saved').textContent"),
               'the Saved tab says what has not been sent yet and where the data lives', await page.evaluate("savedSummary.textContent"))
         await page.wait_for_function("document.querySelector('#savedList [data-role=location]').textContent.includes('-13.50981')", timeout=20000)
         loc = await page.evaluate("document.querySelector('#savedList [data-role=location]').textContent")
         check('-71.98171' in loc and '±7 m' in loc and 'improving' not in loc, 'the location is stored with its accuracy', loc)
         check((await page.evaluate("document.querySelector('#savedList .rec a').href")).startswith('https://maps.google.com/?q=-13.509812,-71.981712'), 'with a map link')
-        check('Test room, niche 3' in await page.evaluate("document.querySelector('#savedList .rec b').textContent"), 'the note is shown')
+        check(await page.evaluate("document.querySelectorAll('#savedList .rec .recNote').length") == 1 and await page.evaluate("document.querySelector('#savedList .rec .more').hidden"),
+              'a measurement is a few lines: its buttons and location are folded away until "More" is tapped')
         check('sound' in await page.evaluate("document.querySelector('#savedList .rec').textContent"), 'the list says the sound was kept')
 
         # a second measurement, then look at the first again
@@ -431,10 +439,23 @@ async def main():
             if 'now' in (await page.evaluate("clap.textContent")).lower(): break
         await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
         await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 2", timeout=5000)
-        check('niche 3' in await page.evaluate("document.querySelector('#savedList .rec:first-child b').textContent"), 'the next measurement is saved by itself too, with the same note')
-        check(await page.evaluate("!shareAll.hidden"), 'two saved measurements offer "send all"')
+        check(await page.evaluate("document.querySelectorAll('#savedList .session').length") == 1 and '2 measurements' in await page.evaluate("document.querySelector('.sessInfo').textContent")
+              and await page.evaluate("document.querySelector('#savedList .rec:first-child .recNote').value") == '', 'the next measurement joins the same session, with an empty note line of its own', await page.evaluate("document.querySelector('.sessInfo').textContent"))
+        ids = await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll();
+            g.onsuccess = () => { q.result.close(); done(g.result.map(r => [r.uuid, r.sessionId, r.placeId, r.sessionNote])); }; }; })""")
+        uu = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+        check(len(ids) == 2 and all(uu.match(i[0]) and uu.match(i[1]) for i in ids) and ids[0][0] != ids[1][0] and ids[0][1] == ids[1][1], 'each measurement has its own identifier and both share the session identifier', ids)
+        # one note for the whole session; earlier places are offered as suggestions
+        await page.fill('#savedList .sessNote', 'Test room'); await page.dispatch_event('#savedList .sessNote', 'change'); await page.wait_for_timeout(700)
+        check(await page.evaluate("saveNote.value") == 'Test room' and await page.evaluate("[...placeList.options].map(o => o.value).join()") == 'Test room'
+              and await page.evaluate("saveNote.getAttribute('list')") == 'placeList', 'the session note is typed once for all its measurements, continues for the next ones, and is offered as a known place')
+        ids = await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll();
+            g.onsuccess = () => { q.result.close(); done(g.result.map(r => [r.sessionNote, r.placeId, r.note])); }; }; })""")
+        check(len(ids) == 2 and all(i[0] == 'Test room' and uu.match(i[1] or '') for i in ids) and ids[0][1] == ids[1][1] and sorted(i[2] for i in ids) == ['', 'Test room, niche 3'],
+              'it is stored on every measurement of the session with one place identifier, and their own notes are untouched', ids)
+        check(await page.evaluate("shareAll.hidden") and await page.evaluate("!!document.querySelector('[data-role=shareSession]')"), 'a session has its own send button')
         await page.click('#savedList .rec:last-child [data-role=show]'); await page.wait_for_timeout(300)
-        check(await page.evaluate("chartTitle.textContent.startsWith('Saved: ') && chartTitle.textContent.includes('niche 3')"), 'a saved measurement can be shown again', await page.evaluate("chartTitle.textContent"))
+        check(await page.evaluate("chartTitle.textContent.startsWith('Saved: ') && chartTitle.textContent.includes('niche 3') && chartTitle.textContent.includes('Test room')"), 'a saved measurement can be shown again', await page.evaluate("chartTitle.textContent"))
         check('117' in await page.evaluate("peaks.textContent"), 'with its peaks')
         await page.click('#next'); await page.wait_for_timeout(300)
         check(await page.evaluate("chartTitle.textContent.includes('clap spectrum')"), 'playing a tone returns to the live measurement')
@@ -465,8 +486,8 @@ async def main():
         await page.click('#savedList .rec:last-child [data-role=share]'); await page.wait_for_timeout(500)
         shares = await page.evaluate("window.__shares")
         names = [f['name'] for f in shares[0]['files']] if shares else []
-        check(len(shares) == 1 and len(names) == 4 and names[0].endswith('-test-room-niche-3.json') and names[1].endswith('-chart.png') and names[2].endswith('-photo.jpg')
-              and names[3].endswith('-sound.wav'), 'sending one measurement gives data, chart, photo and sound', names)
+        check(len(shares) == 1 and len(names) == 4 and re.match(r'^\d{4}-\d\d-\d\d_\d{6}_clap_test-room-niche-3\.json$', names[0]) and names[1].endswith('_chart.png') and names[2].endswith('_photo.jpg')
+              and names[3] == names[0][:-5] + '.wav', 'sending one measurement gives data, chart, photo and sound, named date first', names)
         wav = shares[0]['files'][3].get('wav') if len(names) == 4 else None
         rate = await page.evaluate("window.__ctx.sampleRate")
         check(bool(wav) and wav['format'] == 3 and wav['channels'] == 1 and wav['rate'] == rate and 3.5 * rate < wav['samples'] <= 4.3 * rate
@@ -474,18 +495,25 @@ async def main():
         check(bool(wav) and wav['peak'] > 0.01 and wav['at'] > 0.1 * rate and wav['after'] > 20 * wav['before'], 'and it holds the clap: quiet before, loud at the clap', wav)
         data = json.loads(shares[0]['files'][0]['text']) if shares else {}
         check(data.get('schema') == 'pyramid-resonance-measurement/1' and len(data.get('curve', [])) > 50 and abs(data['location']['lat'] + 13.509812) < 1e-6
-              and data['location']['accuracyM'] == 7 and data['note'] == 'Test room, niche 3' and data['photo']['width'] == 1600 and data['kind'] == 'clap' and data['audio']['samples'] == (wav or {}).get('samples') and data['audio']['format'] == 'float32'
+              and data['location']['accuracyM'] == 7 and data['note'] == 'Test room, niche 3' and data['sessionNote'] == 'Test room' and data['photo']['width'] == 1600 and data['kind'] == 'clap' and data['audio']['samples'] == (wav or {}).get('samples') and data['audio']['format'] == 'float32'
               and any(abs(p['f'] - F0) < 3 for p in data['peaks']), 'the data file holds the spectrum, peaks, place and note', {k: data.get(k) for k in ('time', 'location', 'peaks')})
         check('Location: -13.50981' in shares[0]['text'] and 'maps.google.com' in shares[0]['text'], 'and the message text names the place')
         check(shares[0]['files'][1]['size'] > 3000 and shares[0]['files'][2]['size'] > 3000, 'chart and photo files are not empty')
         check(await page.evaluate("[...document.querySelectorAll('#savedList .rec .flags')].map(f => f.textContent.includes('not sent yet') ? 'no' : f.textContent.includes('sent ') ? 'yes' : '?').join()") == 'no,yes', 'a measurement that was sent is marked as sent, the other is not')
-        await page.click('#shareAll'); await page.wait_for_timeout(500)
+        await page.click('[data-role=shareSession]'); await page.wait_for_timeout(900)
         shares = await page.evaluate("window.__shares")
-        everything = json.loads(shares[-1]['files'][0]['text'])
-        check(len(shares) == 2 and everything['count'] == 2 and everything['measurements'][0]['note'] == 'Test room, niche 3', '"send all" gives one file with both, oldest first')
-        kinds = sorted(f['name'].rsplit('-', 1)[-1] if '-sound' in f['name'] or '-photo' in f['name'] else 'all.json' for f in shares[-1]['files'])
-        check(kinds == ['all.json', 'photo.jpg', 'sound.wav', 'sound.wav'] and all(m['audio'] for m in everything['measurements']) and '2 sound files and 1 photo' in shares[-1]['text'],
-              '"send all" also carries every sound and every photo', [f['name'] for f in shares[-1]['files']])
+        import zipfile, io
+        zf = shares[-1]['files'][0] if len(shares) == 2 and len(shares[-1]['files']) == 1 else {}
+        check(bool(re.match(r'^\d{4}-\d\d-\d\d_\d{4}_test-room_2-measurements\.zip$', zf.get('name', ''))) and zf.get('type') == 'application/zip', 'a session is sent as ONE zip file, named date first', [f['name'] for f in shares[-1]['files']])
+        z = zipfile.ZipFile(io.BytesIO(base64.b64decode(zf.get('b64', ''))))
+        inside = z.namelist()
+        check(z.testzip() is None and len(inside) == 4 and inside[0] == zf['name'][:-4] + '.json' and sorted(n.rsplit('.', 1)[1] for n in inside) == ['jpg', 'json', 'wav', 'wav']
+              and all(re.match(r'^\d{4}-\d\d-\d\d_\d{4,6}_', n) for n in inside), 'the zip holds the data file, both sounds and the photo, each named date first', inside)
+        everything = json.loads(z.read(inside[0]))
+        check(everything['count'] == 2 and everything['measurements'][0]['note'] == 'Test room, niche 3' and all(m['audio'] and m['sessionNote'] == 'Test room' for m in everything['measurements'])
+              and '2 sound files and 1 photo' in shares[-1]['text'], 'its data file lists both measurements, oldest first, with the session note')
+        wavs = [n for n in inside if n.endswith('.wav')]
+        check(all(z.getinfo(n).file_size == 58 + 4 * m['audio']['samples'] for n, m in zip(sorted(wavs), sorted(everything['measurements'], key=lambda m: m['time']))), 'and the sounds in it are whole')
         check(await page.evaluate("savedSummary.textContent.includes('all sent')"), 'after it everything is marked as sent', await page.evaluate("savedSummary.textContent"))
         # a measurement changed after sending is no longer "sent": the copy outside the phone is out of date
         await page.fill('#savedList .rec:first-child .recNote', 'Test room, niche 3 b'); await page.dispatch_event('#savedList .rec:first-child .recNote', 'change'); await page.wait_for_timeout(500)
@@ -493,7 +521,7 @@ async def main():
               'editing the note of a sent measurement marks it as not sent again', await page.evaluate("savedSummary.textContent"))
         await page.fill('#savedList .rec:first-child .recNote', 'Test room, niche 3 c')
         await page.click('#savedList .rec:first-child [data-role=delete]'); await page.wait_for_timeout(200)
-        check(await page.evaluate("document.querySelector('#savedList .rec:first-child [data-role=delete]').textContent") == 'Really delete?' and 'niche 3 c' in await page.evaluate("document.querySelector('#savedList .rec:first-child b').textContent"),
+        check(await page.evaluate("document.querySelector('#savedList .rec:first-child [data-role=delete]').textContent") == 'Really delete?' and 'niche 3 c' in await page.evaluate("document.querySelector('#savedList .rec:first-child .recNote').value"),
               'the tap that ends typing a note is not swallowed, and the note is kept')
         await page.wait_for_timeout(4200)
         # its sound disappears from storage: sending says so and does not mark it as sent
@@ -502,9 +530,15 @@ async def main():
         await page.click('#savedList .rec:first-child [data-role=share]'); await page.wait_for_timeout(700)
         check('NOT INCLUDED' in await page.evaluate("savedMsg.textContent") and 'the sound' in await page.evaluate("savedMsg.textContent")
               and 'not sent yet' in await page.evaluate("document.querySelector('#savedList .rec:first-child .flags').textContent"), 'a send that had to leave the sound out says so and does not count as sent', await page.evaluate("savedMsg.textContent"))
-        # a phone that refuses many files at once: the spectra go alone, and the page says what is missing
-        await page.evaluate("navigator.canShare = (d) => !!(d && d.files && d.files.length === 1)")
-        await page.click('#shareAll'); await page.wait_for_timeout(500)
+        # a phone that will not share a zip gets the same files loose, and the page says so
+        await page.evaluate("navigator.canShare = (d) => !!(d && d.files && d.files.length && !d.files.some(f => f.type === 'application/zip'))")
+        await page.click('[data-role=shareSession]'); await page.wait_for_timeout(900)
+        shares = await page.evaluate("window.__shares")
+        check(len(shares[-1]['files']) >= 3 and shares[-1]['files'][0]['name'].endswith('.json') and 'will not share a zip' in await page.evaluate("savedMsg.textContent"),
+              'if the phone refuses a zip, the files are offered loose and the page says so', await page.evaluate("savedMsg.textContent"))
+        # ... and one that takes a single file only gets the spectra alone, with a plain warning
+        await page.evaluate("navigator.canShare = (d) => !!(d && d.files && d.files.length === 1 && d.files[0].type !== 'application/zip')")
+        await page.click('[data-role=shareSession]'); await page.wait_for_timeout(900)
         shares = await page.evaluate("window.__shares")
         check(len(shares[-1]['files']) == 1 and 'SOUNDS AND PHOTOS ARE NOT' in await page.evaluate("savedMsg.textContent"), 'if the phone refuses many files, the page says the sounds and photos were left out', await page.evaluate("savedMsg.textContent"))
         await page.evaluate("navigator.canShare = (d) => !!(d && d.files && d.files.length)")
@@ -526,7 +560,7 @@ async def main():
         await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 1", timeout=5000)
         await page.reload()
         await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 1", timeout=5000)
-        check('niche 3' in await page.evaluate("savedList.textContent"), 'the second tap deletes that one for good')
+        check('niche 3' in await page.evaluate("document.querySelector('#savedList .rec .recNote').value"), 'the second tap deletes that one for good')
         await page.click('#tabBtn-saved')
         await page.click('#savedList .rec:first-child [data-role=show]'); await page.wait_for_timeout(300)
         await page.wait_for_timeout(900)     # the smooth scroll
@@ -673,6 +707,36 @@ async def main():
         await page.reload(); await page.wait_for_timeout(1200)
         check(await page.evaluate("document.querySelectorAll('#savedList .rec').length") == 5, 'and it is recovered once, not again at every start')
         check(not errors, 'no page errors (interrupted claps)', errors)
+
+        # measurements saved by an older version (no session, no identifiers) are adopted without losing anything
+        page, errors = await new_page(browser, url)
+        await page.wait_for_timeout(600)
+        await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const t = q.result.transaction('records', 'readwrite'), s = t.objectStore('records');
+            const old = (id, time, note) => ({ schema: 'pyramid-resonance-measurement/1', id, time, tzOffsetMin: 120, kind: 'clap', note, fMin: 60, fMax: 250, curve: [[100, -40], [117, -30]], peaks: [{ f: 117, db: -30 }],
+                room: { name: 'custom' }, location: null, locationStatus: 'unavailable', photo: null, audio: null, app: '2.4.0', sentAt: null });
+            s.put(old('20261119170000000-aaaa', '2026-11-19T15:00:00.000Z', 'pyorakellari 3')); s.put(old('20261119170200000-bbbb', '2026-11-19T15:02:00.000Z', 'pyorakellari 3'));
+            s.put(old('20261120090000000-cccc', '2026-11-20T07:00:00.000Z', 'door open')); s.put(old('20261120090100000-dddd', '2026-11-20T07:01:00.000Z', ''));
+            t.oncomplete = () => { q.result.close(); done(); }; }; })""")
+        await page.reload()
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 4", timeout=5000)
+        await page.wait_for_timeout(800)
+        got = await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll();
+            g.onsuccess = () => { q.result.close(); done(g.result.map(r => [r.id.slice(-4), r.sessionId, r.sessionNote, r.note, r.uuid, r.placeId, r.curve.length])); }; }; })""")
+        by = {g[0]: g for g in got}
+        check(len(got) == 4 and by['aaaa'][1] and by['aaaa'][1] == by['bbbb'][1] and by['cccc'][1] == by['dddd'][1] and by['aaaa'][1] != by['cccc'][1] and all(g[4] and g[6] == 2 for g in got),
+              'older measurements are grouped into sessions by their pauses and given identifiers, data untouched', got)
+        check(by['aaaa'][2] == 'pyorakellari 3' and by['aaaa'][3] == '' and by['aaaa'][5] and by['aaaa'][5] == by['bbbb'][5] and by['cccc'][2] == '' and by['cccc'][3] == 'door open' and by['dddd'][3] == '',
+              'a note that a whole old session shared becomes its session note; differing notes stay with their measurements', got)
+        check(await page.evaluate("document.querySelectorAll('#savedList .session').length") == 2 and await page.evaluate("!shareAll.hidden")
+              and await page.evaluate("[...placeList.options].map(o => o.value).join()") == 'pyorakellari 3', 'two sessions are listed, with a button to send everything, and the old place is offered again')
+        await page.evaluate(SHARE_MOCK)
+        await page.click('#shareAll'); await page.wait_for_timeout(700)
+        sent = await page.evaluate("window.__shares")
+        check(len(sent) == 1 and sent[0]['files'][0]['name'] == '2026-11-19_to_2026-11-20_all_4-measurements.zip', '"Send everything" is one zip named by its dates', [f['name'] for f in sent[0]['files']] if sent else sent)
+        await page.set_viewport_size({'width': 390, 'height': 844})
+        await page.click('#tabBtn-saved'); await page.wait_for_timeout(300)
+        await page.screenshot(path='/tmp/saved-tab.png', full_page=True)
+        check(not errors, 'no page errors (older measurements)', errors)
 
         # a clap without the raw sound is saved and plainly marked
         page, errors = await new_page(browser, url, pre="window.AudioWorkletNode = undefined; (window.AudioContext || window.webkitAudioContext).prototype.createScriptProcessor = undefined;")

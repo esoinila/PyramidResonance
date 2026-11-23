@@ -831,7 +831,7 @@
     const recCurve = (rec) => rec.curve.map((p) => ({ f: p[0], db: p[1] }));
     function recTitle(rec) {
         const p = R.localParts(rec);
-        return p.date + ' ' + p.time + (rec.note ? ' · ' + rec.note : '');
+        return p.date + ' ' + p.time + (rec.sessionNote ? ' · ' + rec.sessionNote : '') + (rec.note ? ' · ' + rec.note : '');
     }
 
     function drawChart(cursorF) {
@@ -1036,10 +1036,68 @@
         $('savedSummary').textContent = saved.length ? saved.length + (saved.length === 1 ? ' measurement' : ' measurements') + ' on this phone, ' + (unsent ? unsent + ' not sent yet.' : 'all sent.') : '';
         $('recentTitle').textContent = saved.length + ' saved on this phone' + (unsent ? ', ' + unsent + ' not sent yet' : ', all sent') + '. Newest first' + (saved.length > 5 ? ' (the last 5; all are on the Saved tab)' : '') + ':';
     }
+    // ---------- sessions and places ----------
+    const SESSION_GAP_MIN = 30;
+    // A measurement made within half an hour of the previous one continues that session; otherwise a new one starts
+    function currentSessionId() {
+        const newest = saved[0];
+        if (newest && newest.sessionId && Date.now() - new Date(newest.time).getTime() <= SESSION_GAP_MIN * 60000) return newest.sessionId;
+        return R.uuid();
+    }
+    // A place keeps one identity under its name: the same name gives the same id, a new name a new id
+    const placeKey = (name) => String(name || '').trim().toLowerCase();
+    function placeIdFor(name) {
+        const key = placeKey(name);
+        if (!key) return null;
+        const known = saved.find((r) => r.placeId && placeKey(r.sessionNote) === key);
+        return known ? known.placeId : R.uuid();
+    }
+    // The places used before, newest first, offered as suggestions wherever a session note is typed
+    function placeNames() {
+        const seen = new Set(), out = [];
+        saved.forEach((r) => { const n = (r.sessionNote || '').trim(); if (n && !seen.has(placeKey(n))) { seen.add(placeKey(n)); out.push(n); } });
+        return out.slice(0, 40);
+    }
+    // Records saved before sessions and identities existed get them once, by the pauses between them.
+    // The note they carried was the place note of that time, so it becomes the session's note if they agree.
+    function adoptOldRecords(list) {
+        const changed = [];
+        R.sessions(list.filter((r) => !r.sessionId), SESSION_GAP_MIN).forEach((sess) => {
+            const sid = R.uuid();
+            const notes = new Set(sess.records.map((r) => (r.note || '').trim()));
+            const common = notes.size === 1 ? Array.from(notes)[0] : '';
+            sess.records.forEach((r) => {
+                r.sessionId = sid;
+                if (!R.isUuid(r.uuid)) r.uuid = R.uuid();
+                if (r.sessionNote == null) r.sessionNote = '';
+                if (common && !r.sessionNote) { r.sessionNote = common; r.note = ''; }
+                changed.push(r);
+            });
+        });
+        list.forEach((r) => { if (!R.isUuid(r.uuid)) { r.uuid = R.uuid(); if (!changed.includes(r)) changed.push(r); } });
+        // places: one id per name
+        const ids = {};
+        list.forEach((r) => { const k = placeKey(r.sessionNote); if (k && r.placeId) ids[k] = ids[k] || r.placeId; });
+        list.forEach((r) => {
+            const k = placeKey(r.sessionNote);
+            if (k && !r.placeId) { ids[k] = ids[k] || R.uuid(); r.placeId = ids[k]; if (!changed.includes(r)) changed.push(r); }
+            if (r.placeId === undefined) r.placeId = null;
+        });
+        return changed;
+    }
+    function refreshPlaces() {
+        const places = $('placeList');
+        places.textContent = '';
+        placeNames().forEach((n) => { const o = document.createElement('option'); o.value = n; places.appendChild(o); });
+    }
+    const dateFi = (p) => { const d = p.date.split('-'); return Number(d[2]) + '.' + Number(d[1]) + '.' + d[0]; };
+    const openRecs = new Set();     // records whose extra lines (location, photo, buttons) are unfolded
     function renderSaved() {
         const host = $('savedList');
         // the list is rebuilt while a note may be being typed (a location arrives): keep the cursor where it was
-        const active = document.activeElement, typing = active && active.classList && active.classList.contains('recNote') ? { id: active.dataset.id, at: active.selectionStart } : null;
+        const active = document.activeElement;
+        const typing = active && active.classList && (active.classList.contains('recNote') || active.classList.contains('sessNote'))
+            ? { cls: active.classList.contains('recNote') ? 'recNote' : 'sessNote', id: active.dataset.id, at: active.selectionStart } : null;
         host.textContent = '';
         $('savedEmpty').hidden = saved.length > 0;
         summaries();
@@ -1057,61 +1115,138 @@
             b.addEventListener('click', () => showRecord(rec));
             $('recentList').appendChild(b);
         });
-        $('shareAll').hidden = saved.length < 2;
         const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
-        saved.forEach((rec) => {
-            const box = el('div', null, 'rec');
-            box.dataset.id = rec.id;
-            const title = el('b', recTitle(rec));
-            box.appendChild(title);
-            box.appendChild(el('p', (rec.kind === 'sweep' ? 'Sweep' : 'Clap') + ' ' + rec.fMin + '–' + rec.fMax + ' Hz · ' + R.peakSummary(rec, 4) +
-                (rec.audio ? ' · sound ' + rec.audio.durationS.toFixed(1) + ' s' : ''), 'hint'));
-            box.appendChild(flagLine(rec));
-            const loc = el('p', locationLine(rec) + ' ', 'hint');
-            loc.dataset.role = 'location';
-            if (rec.location) { const a = el('a', 'map'); a.href = R.mapsUrl(rec.location); a.target = '_blank'; a.rel = 'noopener'; loc.appendChild(a); }
-            box.appendChild(loc);
-            // each measurement has its own note, written as it is typed
-            const note = document.createElement('input');
-            note.type = 'text'; note.className = 'recNote'; note.maxLength = 200; note.autocomplete = 'off';
-            note.placeholder = 'Note for this measurement'; note.value = rec.note || ''; note.dataset.id = rec.id;
-            note.setAttribute('aria-label', 'Note for the measurement of ' + recTitle(rec));
-            const writeNote = () => { noteTimers.delete(rec.id); putRecord(rec).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.')); };
-            // only this record's own lines are refreshed: rebuilding the list here would swallow the tap that ended the typing
-            const marks = () => { const old = box.querySelector('.flags'); if (old) old.replaceWith(flagLine(rec)); title.textContent = recTitle(rec); summaries(); };
-            note.addEventListener('input', () => {
-                rec.note = note.value.slice(0, 200);
-                touched(rec);
-                marks();
-                clearTimeout(noteTimers.get(rec.id));
-                noteTimers.set(rec.id, setTimeout(writeNote, 400));
+        const groups = R.sessions(saved, SESSION_GAP_MIN);
+        $('shareAll').hidden = groups.length < 2;
+        refreshPlaces();
+        groups.forEach((sess) => {
+            const card = el('div', null, 'session');
+            card.dataset.key = sess.key;
+            const info = el('p', null, 'hint sessInfo');
+            const describe = () => {
+                const n = sess.records.length, sounds = sess.records.filter((r) => r.audio).length, unsent = sess.records.filter((r) => !r.sentAt).length;
+                const bad = {};
+                sess.records.forEach((r) => flags(r).forEach((f) => { if (f[1] === 'bad') bad[f[0]] = (bad[f[0]] || 0) + 1; }));
+                info.textContent = n + (n === 1 ? ' measurement' : ' measurements') + (sounds ? ', ' + sounds + ' with sound' : '') + ' · ' + (unsent ? unsent + ' not sent yet' : 'all sent');
+                Object.keys(bad).forEach((k) => { const w = el('span', ' · ' + bad[k] + ' × ' + k, 'flag-bad'); info.appendChild(w); });
+            };
+            card.appendChild(el('b', dateFi(sess.start) + ' ' + sess.start.time + (sess.end.time !== sess.start.time ? '–' + sess.end.time : ''), 'sessTitle'));
+            describe();
+            card.appendChild(info);
+            // one note for the whole session; it does not replace a different note that single measurements already carry
+            const sNote = document.createElement('input');
+            sNote.type = 'text'; sNote.className = 'sessNote'; sNote.maxLength = 200; sNote.autocomplete = 'off';
+            sNote.placeholder = 'Place or note for this whole session'; sNote.value = sess.note; sNote.dataset.id = sess.key;
+            sNote.setAttribute('list', 'placeList');
+            sNote.setAttribute('aria-label', 'Note for the session of ' + dateFi(sess.start) + ' ' + sess.start.time);
+            let shown = sess.note;
+            const applySession = (text, final) => {
+                // the place identity is decided once, when the typing is done: the same name is the same place
+                const pid = final ? placeIdFor(text) : undefined;
+                sess.records.forEach((r) => {
+                    if ((r.sessionNote || '') !== shown && (r.sessionNote || '') !== '' && (r.sessionNote || '') !== text) return;   // set differently on purpose: left alone
+                    const samePlace = pid === undefined || (r.placeId || null) === (pid || null);
+                    if ((r.sessionNote || '') === text && samePlace) return;                       // nothing new for this one
+                    r.sessionNote = text;
+                    if (pid !== undefined) r.placeId = pid || null;
+                    touched(r);
+                    clearTimeout(noteTimers.get(r.id));
+                    const write = () => { noteTimers.delete(r.id); putRecord(r).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.')); };
+                    if (final) write(); else noteTimers.set(r.id, setTimeout(write, 400));
+                });
+                shown = text;
+                sess.note = text;
+                // the newest session is the one being measured: what is typed here also goes with its next measurements
+                if (groups[0] === sess) { $('saveNote').value = text; noteTyped(); }
+                if (final) refreshPlaces();
+                describe();
+                summaries();
+            };
+            sNote.addEventListener('input', () => applySession(sNote.value.slice(0, 200), false));
+            sNote.addEventListener('change', () => applySession(sNote.value.trim().slice(0, 200), true));
+            card.appendChild(sNote);
+            const sRow = el('div', null, 'row mt');
+            const sKey = 'session:' + sess.key;
+            const sendB = el('button', prepared.has(sKey) ? 'Tap to send' : 'Send session as one zip', 'ghost');
+            sendB.type = 'button'; sendB.dataset.role = 'shareSession';
+            sendB.addEventListener('click', () => send(sKey, () => prepareZip(sess.records.slice().reverse(), sess.fileBase), sendB, 'Send session as one zip'));
+            sRow.appendChild(sendB);
+            card.appendChild(sRow);
+            const list = el('div', null, 'recs');
+            sess.records.forEach((rec) => {
+                const box = el('div', null, 'rec');
+                box.dataset.id = rec.id;
+                const p = R.localParts(rec);
+                const head = el('p', null, 'recHead');
+                head.appendChild(el('b', p.time + ':' + p.compact.slice(4)));
+                head.appendChild(document.createTextNode(' ' + (rec.kind === 'sweep' ? 'Sweep' : 'Clap') + ' ' + rec.fMin + '–' + rec.fMax + ' Hz · ' + R.peakSummary(rec, 4) +
+                    (rec.audio ? ' · sound ' + rec.audio.durationS.toFixed(1) + ' s' : '')));
+                box.appendChild(head);
+                box.appendChild(flagLine(rec));
+                // one line per measurement for a note about just that one, written as it is typed
+                const line = el('div', null, 'noteLine');
+                const note = document.createElement('input');
+                note.type = 'text'; note.className = 'recNote'; note.maxLength = 200; note.autocomplete = 'off';
+                note.placeholder = 'Note for this one (optional)'; note.value = rec.note || ''; note.dataset.id = rec.id;
+                note.setAttribute('aria-label', 'Note for the measurement of ' + p.time + ':' + p.compact.slice(4));
+                const writeNote = () => { noteTimers.delete(rec.id); putRecord(rec).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.')); };
+                // only this record's own lines are refreshed: rebuilding the list here would swallow the tap that ended the typing
+                const marks = () => { const old = box.querySelector('.flags'); if (old) old.replaceWith(flagLine(rec)); describe(); summaries(); };
+                note.addEventListener('input', () => {
+                    rec.note = note.value.slice(0, 200);
+                    touched(rec);
+                    marks();
+                    clearTimeout(noteTimers.get(rec.id));
+                    noteTimers.set(rec.id, setTimeout(writeNote, 400));
+                });
+                note.addEventListener('change', () => {
+                    const text = note.value.trim().slice(0, 200);
+                    if (text !== rec.note) { rec.note = text; touched(rec); }
+                    marks();
+                    clearTimeout(noteTimers.get(rec.id));
+                    writeNote();
+                });
+                line.appendChild(note);
+                // location, photo and the buttons for this one measurement are folded away until asked for
+                const more = el('div', null, 'more');
+                more.hidden = !openRecs.has(rec.id);
+                const toggle = el('button', more.hidden ? 'More' : 'Less', 'ghost moreBtn');
+                toggle.type = 'button'; toggle.dataset.role = 'more';
+                toggle.setAttribute('aria-expanded', more.hidden ? 'false' : 'true');
+                toggle.addEventListener('click', () => {
+                    more.hidden = !more.hidden;
+                    if (more.hidden) openRecs.delete(rec.id); else openRecs.add(rec.id);
+                    toggle.textContent = more.hidden ? 'More' : 'Less';
+                    toggle.setAttribute('aria-expanded', more.hidden ? 'false' : 'true');
+                });
+                line.appendChild(toggle);
+                box.appendChild(line);
+                const loc = el('p', locationLine(rec) + ' ', 'hint');
+                loc.dataset.role = 'location';
+                if (rec.location) { const a = el('a', 'map'); a.href = R.mapsUrl(rec.location); a.target = '_blank'; a.rel = 'noopener'; loc.appendChild(a); }
+                more.appendChild(loc);
+                if (rec.photo) {
+                    const img = document.createElement('img');
+                    img.alt = 'Photo for this measurement';
+                    if (thumbs.has(rec.id)) img.src = thumbs.get(rec.id);
+                    else loadThumb(rec.id, img);
+                    more.appendChild(img);
+                }
+                const row = el('div', null, 'row mt');
+                const button = (label, role, handler) => { const b = el('button', label, 'ghost'); b.type = 'button'; b.dataset.role = role; b.addEventListener('click', () => handler(rec, b)); row.appendChild(b); };
+                button('Show', 'show', showRecord);
+                button(rec.photo ? 'New photo' : 'Add photo', 'photo', pickPhoto);
+                button(prepared.has(rec.id) ? 'Tap to send' : 'Send', 'share', shareRecord);
+                button('Delete', 'delete', deleteRecord);
+                more.appendChild(row);
+                box.appendChild(more);
+                list.appendChild(box);
             });
-            note.addEventListener('change', () => {
-                const text = note.value.trim().slice(0, 200);
-                if (text !== rec.note) { rec.note = text; touched(rec); }
-                marks();
-                clearTimeout(noteTimers.get(rec.id));
-                writeNote();
-            });
-            box.appendChild(note);
-            if (rec.photo) {
-                const img = document.createElement('img');
-                img.alt = 'Photo for this measurement';
-                if (thumbs.has(rec.id)) img.src = thumbs.get(rec.id);
-                else loadThumb(rec.id, img);
-                box.appendChild(img);
-            }
-            const row = el('div', null, 'row mt');
-            const button = (label, role, handler) => { const b = el('button', label, 'ghost'); b.type = 'button'; b.dataset.role = role; b.addEventListener('click', () => handler(rec, b)); row.appendChild(b); };
-            button('Show', 'show', showRecord);
-            button(rec.photo ? 'New photo' : 'Add photo', 'photo', pickPhoto);
-            button(prepared.has(rec.id) ? 'Tap to send' : 'Send', 'share', shareRecord);
-            button('Delete', 'delete', deleteRecord);
-            box.appendChild(row);
-            host.appendChild(box);
+            card.appendChild(list);
+            host.appendChild(card);
         });
         if (typing) {
-            const again = Array.from(host.querySelectorAll('.recNote')).find((n) => n.dataset.id === typing.id);
+            const again = Array.from(host.querySelectorAll('.' + typing.cls)).find((n) => n.dataset.id === typing.id);
             if (again) { again.focus(); try { again.setSelectionRange(typing.at, typing.at); } catch (e) { /* ignore */ } }
         }
     }
@@ -1174,7 +1309,7 @@
         const id = kind === 'sweep' ? sweepId : null;       // the same id as its checkpoint, so a recovery can never duplicate it
         if (kind === 'sweep') sweepId = null;
         const rec = R.makeRecord({
-            id, time: new Date(), kind, note: $('saveNote').value,
+            id, time: new Date(), kind, sessionNote: $('saveNote').value, sessionId: currentSessionId(), placeId: placeIdFor($('saveNote').value),
             room: { name: settings.room, lengthM: d.L, widthM: d.W, heightM: d.H },
             tempC: settings.temp, fMin: settings.fMin, fMax: settings.fMax,
             sweepDurS: settings.sweepDur, speaker: settings.speaker,
@@ -1233,7 +1368,7 @@
         if (!sweepId) sweepId = R.makeRecord({ kind: 'sweep' }).id;
         try {
             localStorage.setItem(CHECKPOINT + sweepId, JSON.stringify(R.makeRecord({
-                id: sweepId, time: new Date(), kind: 'sweep', note: $('saveNote').value,
+                id: sweepId, time: new Date(), kind: 'sweep', sessionNote: $('saveNote').value, sessionId: currentSessionId(), placeId: placeIdFor($('saveNote').value),
                 room: { name: settings.room, lengthM: d.L, widthM: d.W, heightM: d.H },
                 tempC: settings.temp, fMin: settings.fMin, fMax: settings.fMax, sweepDurS: settings.sweepDur, speaker: settings.speaker,
                 curve, peaks: [], app: BUILD, locationStatus: 'unavailable', interrupted: true, disturbed,
@@ -1392,37 +1527,54 @@
         const base = R.fileBase(rec), missing = [];
         const files = [new File([JSON.stringify(rec, null, 1)], base + '.json', { type: 'application/json' })];
         const png = await chartPng(rec);
-        if (png) files.push(new File([png], base + '-chart.png', { type: 'image/png' }));
+        if (png) files.push(new File([png], base + '_chart.png', { type: 'image/png' }));
         if (rec.photo) {
             const p = await blobOf('photos', rec);
-            if (p) files.push(new File([p], base + '-photo.jpg', { type: 'image/jpeg' })); else missing.push('the photo');
+            if (p) files.push(new File([p], base + '_photo.jpg', { type: 'image/jpeg' })); else missing.push('the photo');
         }
         if (rec.audio) {
             const a = await blobOf('audio', rec);
-            if (a) files.push(new File([a], base + '-sound.wav', { type: 'audio/wav' })); else missing.push('the sound');
+            if (a) files.push(new File([a], base + '.wav', { type: 'audio/wav' })); else missing.push('the sound');
         }
         return { files, title: 'Resonance measurement', text: R.shareText(rec), missing, recs: missing.length ? [] : [rec] };
     }
-    // Everything: one file with all spectra, plus every sound and every photo
-    async function prepareAll() {
-        const day = new Date().toISOString().slice(0, 10), list = saved.slice().reverse(), missing = [];
+    // A set of measurements as ONE zip file: a .json with all spectra and details, every sound, every photo.
+    // list: oldest first. If the phone will not share a zip, the same files go out loose; if it
+    // will not take that many, the spectra go alone and the page says so.
+    async function prepareZip(list, base) {
+        const missing = [], whole = [], loose = [], inZip = [];
         const body = JSON.stringify(R.exportAll(list, BUILD), null, 1);
-        const json = new File([body], 'resonance-all-' + day + '.json', { type: 'application/json' });
-        const files = [json];
+        const json = new File([body], base + '.json', { type: 'application/json' });
+        loose.push(json);
+        inZip.push({ name: base + '.json', bytes: new TextEncoder().encode(body), time: new Date() });
         let sounds = 0, photos = 0;
-        const whole = [];           // the records that go out complete
         for (const rec of list) {
-            const base = R.fileBase(rec);
+            const b = R.fileBase(rec), when = new Date(rec.time);
             let complete = true;
-            if (rec.audio) { const a = await blobOf('audio', rec); if (a) { files.push(new File([a], base + '-sound.wav', { type: 'audio/wav' })); sounds++; } else { complete = false; missing.push('the sound of ' + recTitle(rec)); } }
-            if (rec.photo) { const p = await blobOf('photos', rec); if (p) { files.push(new File([p], base + '-photo.jpg', { type: 'image/jpeg' })); photos++; } else { complete = false; missing.push('the photo of ' + recTitle(rec)); } }
+            if (rec.audio) {
+                const a = await blobOf('audio', rec);
+                if (a) { loose.push(new File([a], b + '.wav', { type: 'audio/wav' })); inZip.push({ name: b + '.wav', bytes: new Uint8Array(a), time: when }); sounds++; }
+                else { complete = false; missing.push('the sound of ' + recTitle(rec)); }
+            }
+            if (rec.photo) {
+                const p = await blobOf('photos', rec);
+                if (p) { loose.push(new File([p], b + '_photo.jpg', { type: 'image/jpeg' })); inZip.push({ name: b + '_photo.jpg', bytes: new Uint8Array(p), time: when }); photos++; }
+                else { complete = false; missing.push('the photo of ' + recTitle(rec)); }
+            }
             if (complete) whole.push(rec);
         }
-        const text = list.length + ' resonance measurements: one file with all spectra, ' + sounds + ' sound file' + (sounds === 1 ? '' : 's') + ' and ' + photos + ' photo' + (photos === 1 ? '' : 's') + '.';
-        return { files, title: 'Resonance measurements', text, missing, recs: whole,
-            // if the phone will not share that many files at once: the spectra alone, and say so plainly
-            fallback: files.length > 1 ? { files: [json], recs: list.filter((r) => !r.audio && !r.photo) } : null };
+        const text = list.length + ' resonance measurement' + (list.length === 1 ? '' : 's') + ' in one zip: a .json file with all spectra, ' + sounds + ' sound file' + (sounds === 1 ? '' : 's') + ' and ' + photos + ' photo' + (photos === 1 ? '' : 's') + '.';
+        const spectraOnly = { files: [json], recs: list.filter((r) => !r.audio && !r.photo),
+            note: 'This phone will not share that many files at once, so ONLY THE SPECTRA are in this send. THE SOUNDS AND PHOTOS ARE NOT: send those measurements one at a time (More, then Send).' };
+        const looseFiles = { files: loose, recs: whole, fallback: loose.length > 1 ? spectraOnly : null,
+            note: 'This phone will not share a zip file, so the ' + loose.length + ' files were offered loose instead.' };
+        let zip = null;
+        try { zip = new File([R.zipStore(inZip)], base + '.zip', { type: 'application/zip' }); } catch (e) { zip = null; }
+        const pack = zip ? { files: [zip], recs: whole, fallback: looseFiles } : looseFiles;
+        return Object.assign({ title: 'Resonance measurements', text, missing }, pack, zip ? {} : { note: null });
     }
+    const prepareAll = () => prepareZip(saved.slice().reverse(), (() => { const g = R.sessions(saved, SESSION_GAP_MIN); const last = g[g.length - 1], first = g[0];
+        return last.start.date + '_to_' + first.end.date + '_all_' + saved.length + '-measurements'; })());
 
     function download(files) {
         files.forEach((f, i) => setTimeout(() => {
@@ -1448,16 +1600,16 @@
         if (pack.missing && pack.missing.length) notes.push('NOT INCLUDED, because the app could not find it in storage: ' + pack.missing.join(', ') + '.');
         const canShare = (files) => { try { return !!(navigator.share && navigator.canShare && navigator.canShare({ files })); } catch (e) { return false; } };
         const asText = (files) => files.map((f) => (f.type === 'application/json' ? new File([f], f.name + '.txt', { type: 'text/plain' }) : f));
-        let shareable = canShare(pack.files);
-        // some phones refuse .json in the share sheet: offer the same text as a .txt file
-        if (!shareable && navigator.share && canShare(asText(pack.files))) { pack = Object.assign({}, pack, { files: asText(pack.files) }); shareable = true; }
-        if (!shareable && navigator.share && pack.fallback) {
-            const small = canShare(pack.fallback.files) ? pack.fallback.files : canShare(asText(pack.fallback.files)) ? asText(pack.fallback.files) : null;
-            if (small) {
-                notes.push('This phone will not share ' + pack.files.length + ' files at once, so ONLY THE SPECTRA are in this send. THE SOUNDS AND PHOTOS ARE NOT: send those measurements one at a time.');
-                pack = Object.assign({}, pack, { files: small, recs: pack.fallback.recs, fallback: null });
-                shareable = true;
-            }
+        // the pack itself, then what it falls back to: the first one this phone will share is used, and the page says which
+        let shareable = false;
+        for (let option = pack, depth = 0; option && depth < 4; option = option.fallback, depth++) {
+            // some phones refuse .json in the share sheet: the same text as a .txt file is tried too
+            const files = canShare(option.files) ? option.files : (navigator.share && canShare(asText(option.files)) ? asText(option.files) : null);
+            if (!files) continue;
+            if (depth && option.note) notes.push(option.note);
+            pack = Object.assign({}, pack, { files, recs: option.recs, fallback: null });
+            shareable = true;
+            break;
         }
         if (!shareable) {
             download(pack.files);
@@ -1478,7 +1630,7 @@
             if (secondTry) {
                 prepared.delete(key);
                 button.textContent = idleLabel;
-                savedMsg('The phone refused to share these files (' + (e && e.message ? e.message : 'no reason given') + '). Nothing was sent and nothing was removed.' + (key === 'all' ? ' Try sending the measurements one at a time.' : ''));
+                savedMsg('The phone refused to share these files (' + (e && e.message ? e.message : 'no reason given') + '). Nothing was sent and nothing was removed.' + (key === 'all' || String(key).indexOf('session:') === 0 ? ' Try sending the measurements one at a time (More, then Send).' : ''));
                 return;
             }
             prepared.set(key, pack);
@@ -1527,6 +1679,7 @@
                 if (r.audioPending && sounds.has(r.id)) { r.audio = r.audioPending; r.audioMissing = false; delete r.audioPending; putRecord(r).catch(() => {}); }
             });
             saved = saved.concat(fromDisk).sort((a, b) => (a.time < b.time ? 1 : -1));
+            adoptOldRecords(saved).forEach((r) => { putRecord(r).catch(() => {}); });
             if (loadFailed) { loadFailed = false; storageWarn = ''; savedMsg(''); tabMarks(); }
         } catch (e) {
             dropDb();
@@ -1717,7 +1870,7 @@
     document.addEventListener('visibilitychange', () => { if (!document.hidden) again(); });
     $('openSaved').addEventListener('click', () => showTab('saved', true));
     $('photoInput').addEventListener('change', photoChosen);
-    $('shareAll').addEventListener('click', () => send('all', async () => prepareAll(), $('shareAll'), 'Send all: spectra, sounds, photos'));
+    $('shareAll').addEventListener('click', () => send('all', async () => prepareAll(), $('shareAll'), 'Send everything as one zip'));
 
     // A hidden page cannot be trusted to keep playing: stop, so the screen never lies
     document.addEventListener('visibilitychange', () => {
