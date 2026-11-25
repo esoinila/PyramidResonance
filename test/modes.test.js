@@ -461,3 +461,15 @@ test('the phone position: pose names, angles and "moved since the previous measu
   assert.strictEqual(R.makeRecord({ kind: 'clap', motion: { gravity: [NaN, 0, 0] } }).motion, null);
   assert.strictEqual(R.makeRecord({ kind: 'clap', motion: { gravity: [0, 0, -9.8], movedSincePrevious: 'yes' } }).motion.movedSincePrevious, null);
 });
+
+test('a record carries its picked spot and direction and its position, and files are named after the spot', () => {
+  const R = require('../records.js');
+  const rec = R.makeRecord({ time: new Date('2026-11-25T16:30:41Z'), tzOffsetMin: 120, kind: 'clap', spot: '  Window sill ', direction: 'towards the door', note: 'typed note',
+    positionId: '11111111-2222-4333-8444-555555555555' });
+  assert.deepStrictEqual([rec.spot, rec.direction, rec.positionId, rec.note], ['Window sill', 'towards the door', '11111111-2222-4333-8444-555555555555', 'typed note']);
+  assert.strictEqual(R.fileBase(rec), '2026-11-25_183041_clap_window-sill', 'the spot, not the typed note, names the file');
+  const bare = R.makeRecord({ time: new Date('2026-11-25T16:30:41Z'), tzOffsetMin: 120, kind: 'clap', positionId: 'not-a-uuid', spot: 'x'.repeat(100) });
+  assert.deepStrictEqual([bare.direction, bare.positionId, bare.spot.length], ['', null, 60]);
+  assert.strictEqual(R.fileBase(R.makeRecord({ time: new Date('2026-11-25T16:30:41Z'), tzOffsetMin: 120, kind: 'clap', note: 'only a note' })), '2026-11-25_183041_clap_only-a-note');
+  assert.strictEqual(R.exportAll([rec], 't').measurements[0].spot, 'Window sill');
+});

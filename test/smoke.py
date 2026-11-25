@@ -402,8 +402,8 @@ async def main():
         n0 = await page.evaluate("document.querySelectorAll('#savedList .rec').length")
         check(n0 >= 2 and await page.evaluate("savedCount.textContent.trim()") == str(n0), 'every finished measurement was saved by itself, and the Saved tab counts them', n0)
         check('Saved by itself at' in await page.evaluate("saveMsg.textContent") and 'sound' in await page.evaluate("saveMsg.textContent"), 'the page says so, and that the sound of the clap was kept', await page.evaluate("saveMsg.textContent"))
-        check(await page.evaluate("!recentBox.hidden && recentList.children.length") == min(n0, 5) and str(n0) + ' saved on this phone' in await page.evaluate("recentTitle.textContent")
-              and re.match(r'\d\d:\d\d:\d\d (clap|sweep)', await page.evaluate("recentList.children[0].textContent")), 'the newest measurements are listed under the chart', await page.evaluate("recentList.children[0].textContent"))
+        check(await page.evaluate("!recentBox.hidden && recentList.children.length") == n0 and str(n0) + ' saved on this phone' in await page.evaluate("recentTitle.textContent")
+              and re.match(r'\d\d:\d\d:\d\d (clap|sweep)', await page.evaluate("recentList.children[0].textContent")), 'the session being measured is listed whole under the chart', await page.evaluate("recentList.children[0].textContent"))
         check(await page.evaluate("document.getElementById('saveBtn') === null && document.getElementById('keepAudio') === null"), 'there is no Save button and no way to switch the sound off')
         check(await page.evaluate("PyramidUpdate.busy() === false"), 'a measurement that is already stored does not hold back an update')
         await page.evaluate(SHARE_MOCK)
@@ -426,8 +426,8 @@ async def main():
         loc = await page.evaluate("document.querySelector('#savedList [data-role=location]').textContent")
         check('-71.98171' in loc and '±7 m' in loc and 'improving' not in loc, 'the location is stored with its accuracy', loc)
         check((await page.evaluate("document.querySelector('#savedList .rec a').href")).startswith('https://maps.google.com/?q=-13.509812,-71.981712'), 'with a map link')
-        check(await page.evaluate("document.querySelectorAll('#savedList .rec .recNote').length") == 1 and await page.evaluate("document.querySelector('#savedList .rec .more').hidden"),
-              'a measurement is a few lines: its buttons and location are folded away until "More" is tapped')
+        check(await page.evaluate("document.querySelectorAll('#savedList .rec .recNote').length") == 1 and await page.evaluate("['delete', 'share', 'photo', 'show', 'location'].every(r => document.querySelector('#savedList .rec .more [data-role=' + r + ']')) && !!document.querySelector('#savedList .rec .more .recNote') && !!document.querySelector('#savedList .rec .recHead .recSel')"),
+              'a measurement is a few lines with a tick box: its typed note, buttons and location are under "More"')
         check('sound' in await page.evaluate("document.querySelector('#savedList .rec').textContent"), 'the list says the sound was kept')
 
         # a second measurement, then look at the first again
@@ -650,7 +650,7 @@ async def main():
         # a clap cut short keeps what was recorded
         page, errors = await new_page(browser, url)
         spot = "JSON.stringify(['sweep', 'chart'].map(id => Math.round(document.getElementById(id).getBoundingClientRect().top)))"
-        check(await page.evaluate("motionAsk2.disabled && motionLine2.textContent.includes('once the microphone is on')"), 'before the microphone is on, the phone-position button is not offered')
+        check(await page.evaluate("motionAsk2.disabled"), 'before the microphone is on, the phone-position button is not offered')
         await page.click('#mic'); await page.wait_for_timeout(900)
         y1 = await page.evaluate(spot)
         check(await page.evaluate("!motionAsk2.disabled && motionAsk2.style.visibility === 'visible'"), 'the phone-position button is there as soon as the microphone is on')
@@ -861,8 +861,8 @@ async def main():
               and await page.evaluate("saveNote.value") == 'Other place cellar', 'and that clap gets the finished note, in the same session and place as the others', notes)
 
         # ---- the motion sensor: how the phone lay, and whether it was moved since the previous measurement
-        check('not being noted' in await page.evaluate("motionLine.textContent") and await page.evaluate("!motionAsk2.disabled && motionAsk2.style.visibility === 'visible' && motionAsk2.closest('.tab').id") == 'tab-measure' and await page.evaluate("document.querySelector('#savedList .rec').textContent.includes('Phone:')") is False,
-              'the motion sensor is never asked for by itself: a button beside the microphone offers it, and measurements are saved as before without it', await page.evaluate("motionLine.textContent"))
+        check(re.search(r'not allowed|not being noted|waiting', await page.evaluate("motionLine.textContent")) is not None and await page.evaluate("!motionAsk2.disabled && motionAsk2.style.visibility === 'visible' && motionAsk2.closest('.tab').id") == 'tab-measure' and await page.evaluate("document.querySelector('#savedList .rec').textContent.includes('Phone:')") is False,
+              'while the motion sensor is not giving anything, a button beside the microphone offers it, and measurements are saved as before without it', await page.evaluate("motionLine.textContent"))
         await page.click('#motionAsk2')
         # a phone lying flat that reports 50 times a second
         await page.evaluate("""(() => { window.__g = [0, 0, 9.81]; window.__rot = 0;
@@ -932,8 +932,8 @@ async def main():
         await page.wait_for_timeout(3200)
         m5 = await page.evaluate(last)
         check(m5 and m5['inMotionDuringMs'] >= 300 and 'PHONE MOVED DURING IT' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent"), 'a phone moved during the measurement is flagged in red', m5)
-        await page.click('#savedList .rec:first-child [data-role=more]')
-        check('Phone: upright' in await page.evaluate("document.querySelector('#savedList .rec:first-child .more').textContent"), 'the phone position is spelled out under "More"')
+        await page.click('#savedList .rec [data-role=more]')
+        check('Phone: upright' in await page.evaluate("document.querySelector('#savedList .rec .more').textContent"), 'the phone position is spelled out under "More"')
         check(await page.evaluate("document.querySelectorAll('#savedList .rec').length") == n0 + 6, '(test setup) six measurements were added')
         # whatever goes wrong inside the motion code, the measurement is still saved
         await page.evaluate("(() => { Records.movedSince = () => { throw new Error('motion code broke'); }; })()")
@@ -946,6 +946,122 @@ async def main():
         check(await page.evaluate("document.querySelectorAll('#savedList .rec').length") == n0 + 7 and await page.evaluate(last) is None and 'Saved by itself' in await page.evaluate("saveMsg.textContent"),
               'a failure inside the motion code does not stop the measurement being saved', await page.evaluate("saveMsg.textContent"))
         await page.evaluate("clearInterval(window.__sensor)")
+        # ---- a phone that asks before giving its motion sensor (an iPhone): one "Tap to start", then everything is on by itself
+        page, errors = await new_page(browser, url, pre="DeviceMotionEvent.requestPermission = () => (navigator.userActivation && navigator.userActivation.isActive) ? Promise.resolve('granted') : Promise.reject(new DOMException('needs a tap', 'NotAllowedError'));")
+        await page.wait_for_function("!startGate.hidden", timeout=4000)
+        check(await page.evaluate("startGate.getBoundingClientRect().height >= innerHeight - 1 && startGate.textContent.includes('Tap to start')"), 'where the phone must be asked, the app opens with one "Tap to start" screen')
+        await page.keyboard.press('Tab'); await page.keyboard.press('Enter'); await page.wait_for_timeout(400)      # the start button by keyboard, as VoiceOver or a keyboard would
+        check(await page.evaluate("startGate.hidden") and 'waiting for the motion sensor' in await page.evaluate("motionLine.textContent"), 'one tap closes it and the motion sensor is being listened to', await page.evaluate("motionLine.textContent"))
+        await page.evaluate("""(() => { window.__g = [0, 0, 9.81]; window.__rot = 0;
+            window.__sensor = setInterval(() => window.dispatchEvent(new DeviceMotionEvent('devicemotion', { accelerationIncludingGravity: { x: window.__g[0], y: window.__g[1], z: window.__g[2] },
+                acceleration: { x: 0, y: 0, z: 0 }, rotationRate: { alpha: window.__rot, beta: 0, gamma: 0 }, interval: 20 })), 20); })()""")
+        await page.wait_for_function("motionLine.textContent.startsWith('Phone position: on')", timeout=4000)
+        # the spot is picked, not typed each time: one new value, then it stays for the next measurements
+        await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="+"]')
+        await page.keyboard.type('saddle'); await page.keyboard.press('Enter'); await page.wait_for_timeout(300)
+        check(await page.evaluate("document.querySelector('#tagBar .tagRow[data-attr=spot] .chip[aria-pressed=true]').textContent") == 'saddle', 'a new spot is added once and is then the spot for the next measurements')
+        check(await page.evaluate("clap.textContent") == 'Record a clap · saddle', 'the clap button says which spot the next measurement will carry', await page.evaluate("clap.textContent"))
+        gap = await page.evaluate("document.querySelector('#tagBar .chip').getBoundingClientRect().top - clap.getBoundingClientRect().bottom")
+        check(0 < gap < 220 and await page.evaluate("document.querySelector('#tagBar .tagRow[data-attr=direction]').getBoundingClientRect().bottom < innerHeight"), 'the spot and direction values sit right under the clap button, on the same screen', gap)
+        # nothing under the finger moves when a value is picked or a row is ticked
+        where = "JSON.stringify(['#mic', '#clap', '#tagBar .tagRow[data-attr=spot] .chip', '#tagBar .tagRow[data-attr=direction] .chip', '#chart'].map(s => Math.round(document.querySelector(s).getBoundingClientRect().top)))"
+        w0 = await page.evaluate(where)
+        await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value=""]'); await page.wait_for_timeout(200)
+        w1 = await page.evaluate(where)
+        await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="saddle"]'); await page.wait_for_timeout(200)
+        check(w0 == w1 == await page.evaluate(where), 'picking or clearing a value moves neither the buttons, the chips nor the chart', w0 + ' ' + w1)
+        # a value typed in a different spelling is the existing value; a chip tapped while typing wins over the half-typed text
+        await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="+"]')
+        await page.keyboard.type('SADDLE'); await page.keyboard.press('Enter'); await page.wait_for_timeout(300)
+        check(await page.evaluate("[...document.querySelectorAll('#tagBar .tagRow[data-attr=spot] .chip')].map(c => c.textContent).join()") == 'saddle,none,+ new', 'the same word in other capitals does not become a second value', await page.evaluate("[...document.querySelectorAll('#tagBar .tagRow[data-attr=spot] .chip')].map(c => c.textContent).join()"))
+        await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="+"]')
+        await page.keyboard.type('oops')
+        await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="saddle"]'); await page.wait_for_timeout(300)
+        vals = await page.evaluate("[...document.querySelectorAll('#tagBar .tagRow[data-attr=spot] .chip')].map(c => c.textContent + (c.getAttribute('aria-pressed') === 'true' ? '*' : '')).join()")
+        check('oops' not in vals and await page.evaluate("document.querySelector('#tagBar .chipInput')") is None, 'a chip tapped while a new value is being typed drops the half-typed value', vals)
+        if 'saddle*' not in vals: await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="saddle"]')
+        # one tap on "Record a clap" with the microphone off: it turns the microphone on and records
+        check(await page.evaluate("meterText.textContent") == 'Microphone off', '(test setup) the microphone is off')
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        await page.evaluate("window.__g = [0, 9.81, 0]")
+        await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="+"]')
+        await page.keyboard.type('window sill'); await page.keyboard.press('Enter'); await page.wait_for_timeout(300)
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        rows = "(() => { const q = indexedDB.open('pyramid-res'); return new Promise((done) => { q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll(); g.onsuccess = () => { q.result.close(); done(g.result.sort((a, b) => a.time < b.time ? -1 : 1).map(r => [r.spot, r.direction, r.positionId, r.note, !!r.audio, r.motion && r.motion.movedSincePrevious])); }; }; }); })()"
+        got = await page.evaluate(rows)
+        check(len(got) == 4 and all(g[4] for g in got), 'one tap on "Record a clap" turns the microphone on and records; four claps saved with sound', got)
+        check([g[0] for g in got] == ['saddle', 'saddle', 'window sill', 'window sill'], 'each measurement carries the spot that was picked when it was made', [g[0] for g in got])
+        uu = re.compile(r'^[0-9a-f-]{36}$')
+        check(all(uu.match(g[2] or '') for g in got) and got[0][2] == got[1][2] and got[2][2] == got[3][2] and got[1][2] != got[2][2], 'measurements made without moving the phone share a position; moving it starts a new one', [g[2] for g in got])
+        check(await page.evaluate("[...document.querySelectorAll('#recentList .recentRow')].length") == 4 and 'window sill' in await page.evaluate("recentList.children[0].textContent") and await page.evaluate("document.querySelectorAll('#recentList .recSel').length") == 4,
+              'the list under the chart shows the whole session with tick boxes and each spot, without leaving the Measure tab')
+        # earlier measurements get a value by ticking them and tapping it: here straight on the Measure tab
+        w0 = await page.evaluate(where)
+        box = await page.evaluate("JSON.stringify((r => [Math.round(r.width), Math.round(r.height)])(document.querySelector('#recentList .selWrap').getBoundingClientRect()))")
+        check(all(v >= 44 for v in json.loads(box)), 'a tick box has a finger-sized target', box)
+        await page.click('#recentList .recentRow:nth-child(3) .selWrap'); await page.click('#recentList .recentRow:nth-child(4) .selWrap')
+        check('2 selected' in await page.evaluate("document.querySelector('#tagBar .tagLead').textContent") and (lambda a, b: [v - a[0] for v in a] == [v - b[0] for v in b])(json.loads(await page.evaluate(where)), json.loads(w0)), 'ticking rows turns the value bar to "2 selected" without moving anything', await page.evaluate(where) + ' vs ' + w0)
+        await page.click('#tagBar .tagRow[data-attr=direction] .chip[data-value="+"]')
+        await page.keyboard.type('towards door'); await page.keyboard.press('Enter'); await page.wait_for_timeout(500)
+        got = await page.evaluate(rows)
+        check([g[1] for g in got] == ['towards door', 'towards door', '', ''] and await page.evaluate("document.querySelectorAll('.recSel:checked').length") == 0
+              and await page.evaluate("document.querySelector('#tagBar .tagRow[data-attr=direction] .chip[aria-pressed=true]')") is None, 'a value tapped with rows ticked goes to those rows only, and the ticks clear', [g[1] for g in got])
+        # ticks do not follow to another tab, where they could not be seen
+        await page.click('#recentList .recentRow:nth-child(1) .selWrap')
+        await page.click('#tabBtn-saved')
+        check(await page.evaluate("document.querySelectorAll('.recSel:checked').length") == 0 and 'next measurements' in await page.evaluate("document.querySelector('#tagBarSaved .tagLead').textContent"), 'switching tabs clears the ticks')
+        # ... and on the Saved tab by position: one tap selects everything measured in that position
+        heads = await page.evaluate("[...document.querySelectorAll('#savedList .posGroup .posTitle')].map(e => e.textContent)")
+        check(len(heads) == 2 and heads[0].startswith('Position 2 · 2 measurements · phone upright') and heads[1].startswith('Position 1 · 2 measurements · phone flat, screen up'), 'the Saved tab groups the rows by phone position', heads)
+        await page.click('#savedList .posGroup [data-role=pickPosition]')
+        check('2 selected' in await page.evaluate("document.querySelector('#tagBarSaved .tagLead').textContent"), '"Select" on a position ticks all its measurements')
+        await page.click('#tagBarSaved .tagRow[data-attr=direction] .chip[data-value="towards door"]'); await page.wait_for_timeout(500)
+        got = await page.evaluate(rows)
+        check([g[1] for g in got] == ['towards door'] * 4 and all(g[3] == '' for g in got), 'an existing value is given to a whole position with two taps and no typing', [g[1] for g in got])
+        check('saddle · towards door' in await page.evaluate("document.querySelector('#savedList .rec:last-child .recTags').textContent"), 'each row shows its spot and direction')
+        await page.evaluate(SHARE_MOCK)
+        await page.click('[data-role=shareSession]'); await page.wait_for_timeout(1200)
+        sent = await page.evaluate("window.__shares")
+        import zipfile as zf2, io as io2
+        names = zf2.ZipFile(io2.BytesIO(base64.b64decode(sent[-1]['files'][0]['b64']))).namelist() if sent and sent[-1]['files'][0].get('b64') else []
+        check(sum(1 for n in names if n.endswith('_clap_saddle.wav')) == 2 and sum(1 for n in names if n.endswith('_clap_window-sill.wav')) == 2, 'the sound files are named after their spot', names)
+        await page.evaluate("clearInterval(window.__sensor)")
+        await page.reload(); await page.wait_for_timeout(700)
+        check(await page.evaluate("document.querySelector('#tagBar .tagRow[data-attr=spot] .chip[aria-pressed=true]').textContent") == 'window sill' and await page.evaluate("!startGate.hidden"), 'the picked spot is remembered over a restart (and the phone is asked again, as an iPhone does)')
+        await page.click('#gateSkip'); await page.wait_for_timeout(300)
+        check(await page.evaluate("startGate.hidden") and 'waiting' not in await page.evaluate("motionLine.textContent") and await page.evaluate("clap.textContent") == 'Record a clap · window sill',
+              'the start screen can be skipped; the app then works without the motion sensor', await page.evaluate("motionLine.textContent"))
+        errors[:] = [e for e in errors if 'needs a tap' not in e]
+        check(not errors, 'no page errors (tags and positions)', errors)
+        # a spot picked in a session that ended long ago is not carried into a new day
+        page, errors = await new_page(browser, url, pre="try { localStorage.setItem('pyramid-res-tags', JSON.stringify({ next: { spot: 'window sill', direction: 'north' }, extra: { spot: [], direction: [] }, setAt: Date.now() - 3 * 3600 * 1000 })); } catch (e) {}")
+        await page.wait_for_timeout(900)
+        check(await page.evaluate("document.querySelector('#tagBar .chip[aria-pressed=true]')") is None and await page.evaluate("clap.textContent") == 'Record a clap (4 s)'
+              and await page.evaluate("JSON.parse(localStorage.getItem('pyramid-res-tags')).next.spot") == '', 'a spot left over from an old session is dropped, not applied to the next clap', await page.evaluate("clap.textContent"))
+        check(not errors, 'no page errors (old tags)', errors)
+
         check(not errors, 'no page errors (no storage)', errors)
         await page.close()
 

@@ -8,8 +8,8 @@
 
     // Must equal VERSION in sw.js (a test checks it). Change both for every release:
     // the new sw.js is what makes phones fetch the new files, all at once.
-    const BUILD = '2.6.0';
-    const RELEASED = '2026-11-23T16:13:00Z';   // when this version was published; the same value is in sw.js
+    const BUILD = '2.7.0';
+    const RELEASED = '2026-11-25T17:55:00Z';   // when this version was published; the same value is in sw.js
     const MATCH_TOL = 1.5;    // percent: how close a measured peak must be to a listed mode
 
     // Registering the service worker and reloading into a new version is done by the small
@@ -374,6 +374,7 @@
             abortSweep();
             keepPartialSweep();      // never start over the top of an unsaved one
             recording = micOn;
+            try { if (selected.size) { selected.clear(); syncBoxes(); } } catch (e) { /* an extra */ }
             if (recording) { try { motionBegin(1000); } catch (e) { /* an extra */ } }
             if (recording) { rawAudio = null; curve = []; curveState = 'none'; viewing = null; curveKind = 'sweep'; disturbed = false; sweepId = null; checkpointAt = 0; $('peaks').textContent = ''; }
             lastReadF = 0;
@@ -551,7 +552,7 @@
         if (h != null && Number.isFinite(h)) motion.heading = h;
     }
     function motionLine() {
-        const text = { off: 'Phone position: not being noted. Tap the button to let the app use the motion sensor.', asking: 'Phone position: waiting for your answer…',
+        const text = { off: motion.listening ? 'Phone position: waiting for the motion sensor…' : 'Phone position: not being noted. Tap the button to let the app use the motion sensor.', asking: 'Phone position: waiting for your answer…',
             on: 'Phone position: on. Each measurement notes how the phone lay and whether it was moved since the previous one.',
             denied: 'Phone position: the motion sensor is not allowed. Measurements are saved as usual, without it. To allow it, close the app completely, open it again and answer "Allow".',
             none: 'Phone position: this device gives no motion data. Measurements are saved as usual, without it.' }[motion.status];
@@ -560,7 +561,7 @@
         const ask = document.getElementById('motionAsk'), ask2 = document.getElementById('motionAsk2');
         if (line) line.textContent = text;
         // beside the microphone: one short line and a button that keep their place whether shown or not, so nothing below jumps
-        if (line2) line2.textContent = { off: micOn ? 'Phone position: not being noted.' : 'Phone position: can be noted once the microphone is on.', asking: 'Phone position: waiting for your answer…',
+        if (line2) line2.textContent = { off: motion.listening ? 'Phone position: waiting for the motion sensor…' : 'Phone position: not being noted.', asking: 'Phone position: waiting for your answer…',
             on: 'Phone position: noted with each measurement.', denied: 'Phone position: sensor not allowed (see Setup).', none: 'Phone position: no motion sensor here.' }[motion.status];
         const done = motion.status === 'on' || motion.status === 'none' || motion.status === 'asking';
         if (ask) ask.hidden = done;
@@ -571,17 +572,44 @@
         }
     }
     // Must be called straight from a tap: an iPhone only shows its permission question then.
+    function motionListen() {
+        if (motion.listening) return;
+        motion.listening = true;
+        window.addEventListener('devicemotion', onMotion);
+        window.addEventListener('deviceorientation', onHeading);
+        window.addEventListener('deviceorientationabsolute', onHeading);
+        // a device with no sensor never sends an event
+        setTimeout(() => { if (!motion.seen && motion.status !== 'denied' && motion.status !== 'asking') { motion.status = 'none'; motionLine(); } }, 3000);
+    }
+    // At start the sensor is switched on without anyone having to think of it. Where the phone wants to ask first
+    // (an iPhone, once per fresh start, and only in answer to a tap), one "Tap to start" screen provides that tap
+    // before any measuring begins. Whatever the answer, and whatever goes wrong here, the app works as usual.
+    function motionAuto() {
+        if (typeof DeviceMotionEvent === 'undefined') { motion.status = 'none'; motionLine(); return; }
+        if (typeof DeviceMotionEvent.requestPermission !== 'function') { motionListen(); return; }      // no question to ask
+        const gate = () => {
+            const g = document.getElementById('startGate');
+            if (!g) return;
+            const go = () => { try { motionEnable(); } catch (e) { /* an extra */ } g.hidden = true; };
+            const skip = document.getElementById('gateSkip');
+            if (skip) skip.addEventListener('click', (e) => { e.stopPropagation(); g.hidden = true; motionLine(); });
+            g.addEventListener('click', go);
+            document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !g.hidden) { g.hidden = true; motionLine(); } });
+            g.hidden = false;
+            try { g.focus(); } catch (e) { /* ignore */ }
+        };
+        let asked;
+        // without a tap this only succeeds when the answer was already given since the app was last started
+        try { asked = DeviceMotionEvent.requestPermission(); } catch (e) { gate(); return; }
+        Promise.resolve(asked).then((answer) => {
+            motion.status = answer === 'granted' ? 'off' : 'denied';
+            motionListen();
+            motionLine();
+        }, gate);
+    }
     function motionEnable() {
         if (motion.status === 'asking' || (motion.listening && motion.status !== 'denied')) return;     // after a refusal the question can be put again
-        const listen = () => {
-            if (motion.listening) return;
-            motion.listening = true;
-            window.addEventListener('devicemotion', onMotion);
-            window.addEventListener('deviceorientation', onHeading);
-            window.addEventListener('deviceorientationabsolute', onHeading);
-            // a device with no sensor never sends an event
-            setTimeout(() => { if (!motion.seen && motion.status !== 'denied' && motion.status !== 'asking') { motion.status = 'none'; motionLine(); } }, 3000);
-        };
+        const listen = motionListen;
         try {
             if (typeof DeviceMotionEvent === 'undefined') { motion.status = 'none'; motionLine(); return; }
             if (typeof DeviceMotionEvent.requestPermission === 'function') {
@@ -657,7 +685,7 @@
             stream.getTracks().forEach((t) => { t.onended = () => { if (micStream === stream) micOff('The microphone was taken away by the system.'); }; });
             micOn = true;
             // the phone-position extra: where no question has to be asked it simply starts; otherwise its button is shown now
-            try { if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission !== 'function') motionEnable(); motionLine(); } catch (e) { /* an extra */ }
+            try { motionLine(); } catch (e) { /* an extra */ }
             $('mic').textContent = 'Turn microphone off';
             $('mic').classList.add('on');
             meterTimer = setInterval(meterTick, 100);
@@ -691,8 +719,8 @@
     }
 
     function setClapButton(text) {
-        $('clap').disabled = !micOn || clapBusy;
-        $('clap').textContent = text || 'Record a clap (4 s)';
+        $('clap').disabled = clapBusy || micBusy;       // with the microphone off, the tap turns it on first
+        $('clap').textContent = text || clapLabel();
     }
 
     function meterTick() {
@@ -742,6 +770,8 @@
 
     async function recordClap() {
         if (!micOn || clapBusy || micBusy) return;
+        // ticks end with the tap that starts a measurement, not some seconds later when the recording begins
+        try { if (selected.size) { selected.clear(); syncBoxes(); } } catch (e) { /* an extra */ }
         if (!(settings.fMax > settings.fMin)) {
             $('micWarn').textContent = 'Set "To Hz" higher than "From Hz" on the Setup tab first.';
             return;
@@ -1171,8 +1201,168 @@
         const unsent = saved.filter((r) => !r.sentAt).length;
         $('savedCount').textContent = saved.length ? ' ' + saved.length : '';
         $('savedSummary').textContent = saved.length ? saved.length + (saved.length === 1 ? ' measurement' : ' measurements') + ' on this phone, ' + (unsent ? unsent + ' not sent yet.' : 'all sent.') : '';
-        $('recentTitle').textContent = saved.length + ' saved on this phone' + (unsent ? ', ' + unsent + ' not sent yet' : ', all sent') + '. Newest first' + (saved.length > 5 ? ' (the last 5; all are on the Saved tab)' : '') + ':';
+        $('recentTitle').textContent = saved.length + ' saved on this phone' + (unsent ? ', ' + unsent + ' not sent yet' : ', all sent') + '. Newest first; the session being measured is listed whole:';
     }
+    // ---------- spot and direction: picked, not typed ----------
+    // Two things are said about a measurement by tapping a value from a short set: the spot in the place where the
+    // phone was, and its direction. With nothing selected, a tap sets the value for the measurements to come.
+    // With measurements selected (their boxes ticked), the same tap gives the value to those.
+    const TAGS = [['spot', 'Spot'], ['direction', 'Direction']];
+    const tagNext = { spot: '', direction: '' };        // for the next measurements
+    const tagExtra = { spot: [], direction: [] };       // values added by hand that no measurement carries yet
+    const selected = new Set();                         // ids of the measurements whose box is ticked
+    try {
+        const t = JSON.parse(localStorage.getItem('pyramid-res-tags') || 'null');
+        if (t) TAGS.forEach(([a]) => {
+            if (t.next && typeof t.next[a] === 'string') tagNext[a] = t.next[a].slice(0, 60);
+            if (t.extra && Array.isArray(t.extra[a])) tagExtra[a] = t.extra[a].filter((v) => typeof v === 'string').map((v) => v.slice(0, 60)).slice(0, 20);
+        });
+    } catch (e) { /* start with none */ }
+    let tagSetAt = 0;       // when a value for the next measurements was last picked
+    try { tagSetAt = Number(JSON.parse(localStorage.getItem('pyramid-res-tags') || '{}').setAt) || 0; } catch (e) { tagSetAt = 0; }
+    const saveTags = () => { try { localStorage.setItem('pyramid-res-tags', JSON.stringify({ next: tagNext, extra: tagExtra, setAt: tagSetAt })); } catch (e) { /* kept for this run */ } };
+    // A picked spot or direction belongs to the session it was picked in. Once that session is over (nothing picked
+    // and nothing measured for half an hour) it is dropped, so that tomorrow's first clap elsewhere is not labelled with it.
+    function expireTags() {
+        if (!tagNext.spot && !tagNext.direction) return;
+        const last = Math.max(tagSetAt, saved[0] ? new Date(saved[0].time).getTime() : 0);
+        if (Date.now() - last <= SESSION_GAP_MIN * 60000) return;
+        tagNext.spot = ''; tagNext.direction = '';
+        saveTags();
+        renderTagBars();
+        try { saveNote('The spot and direction picked in an earlier session were cleared: pick them again for this one.'); } catch (e) { /* an extra */ }
+    }
+    // the button says what the next measurement will be labelled with, so a left-over value cannot go unnoticed
+    function clapLabel() {
+        const t = [tagNext.spot, tagNext.direction].filter(Boolean).join(', ');
+        return 'Record a clap' + (t ? ' · ' + t : ' (4 s)');
+    }
+    // In a fixed order (first used first), so that a chip never changes place when it is picked
+    function tagValues(attr) {
+        const seen = new Set(), out = [];
+        const add = (v) => { v = String(v || '').trim(); const k = v.toLowerCase(); if (v && !seen.has(k)) { seen.add(k); out.push(v); } };
+        for (let i = saved.length - 1; i >= 0; i--) add(saved[i][attr]);       // oldest measurement first
+        tagExtra[attr].slice().reverse().forEach(add);                          // then the ones added by hand, in the order added
+        add(tagNext[attr]);
+        return out.slice(-16);
+    }
+    const picked = () => saved.filter((r) => selected.has(r.id));
+    // value '' clears. force: set, never toggle off (used when a value has just been typed)
+    function setTag(attr, value, force) {
+        const recs = picked();
+        if (recs.length) {
+            recs.forEach((r) => {
+                if ((r[attr] || '') === value) return;
+                r[attr] = value;
+                touched(r);
+                putRecord(r).catch((e) => {
+                    const why = 'The new ' + attr + ' of a measurement could not be stored (' + (e && e.message ? e.message : 'storage error') + '). It shows on the page but may be gone after a restart: pick it again.';
+                    savedMsg(why); saveNote(why, true);
+                });
+            });
+            selected.clear();
+            renderSaved();
+            return;
+        }
+        tagNext[attr] = !force && tagNext[attr] === value ? '' : value;
+        tagSetAt = Date.now();
+        saveTags();
+        renderTagBars();
+        if (!clapBusy) setClapButton();
+    }
+    function syncBoxes() {
+        document.querySelectorAll('.recSel').forEach((b) => { b.checked = selected.has(b.dataset.id); });
+        renderTagBars();
+    }
+    // ticks all of them, or unticks them if all were ticked already
+    function pickMany(recs) {
+        const all = recs.length > 0 && recs.every((r) => selected.has(r.id));
+        recs.forEach((r) => { if (all) selected.delete(r.id); else selected.add(r.id); });
+        syncBoxes();
+    }
+    function selBox(rec) {
+        const b = document.createElement('input');
+        b.type = 'checkbox'; b.className = 'recSel'; b.dataset.id = rec.id; b.checked = selected.has(rec.id);
+        b.setAttribute('aria-label', 'Select the measurement of ' + R.localParts(rec).time + ':' + R.localParts(rec).compact.slice(4));
+        b.addEventListener('change', () => { if (b.checked) selected.add(rec.id); else selected.delete(rec.id); syncBoxes(); });
+        const wrap = document.createElement('label');       // the whole 44 px square takes the tap
+        wrap.className = 'selWrap';
+        wrap.appendChild(b);
+        return wrap;
+    }
+    const tagText = (rec) => TAGS.map(([a]) => rec[a]).filter(Boolean).join(' · ');
+    function renderTagBars() {
+        const n = picked().length;
+        ['tagBar', 'tagBarSaved'].forEach((id) => {
+            const host = document.getElementById(id);
+            if (!host) return;
+            const typing = host.contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
+            if (typing) return;         // a new value is being typed in this bar: it is redrawn when that is done
+            host.textContent = '';
+            const lead = document.createElement('div');
+            lead.className = 'tagLead';
+            const say = document.createElement('span');
+            say.className = 'hint';
+            say.textContent = n ? n + ' selected: tap a value to give it to ' + (n === 1 ? 'it' : 'them') + '.' : 'For the next measurements. To change earlier ones, tick their boxes first.';
+            lead.appendChild(say);
+            // always there, so that nothing below moves when the first row is ticked
+            const clear = document.createElement('button');
+            clear.type = 'button'; clear.className = 'ghost pickBtn'; clear.textContent = 'Clear'; clear.dataset.role = 'clearSelection';
+            clear.setAttribute('aria-label', 'Clear the selection');
+            clear.style.visibility = n ? 'visible' : 'hidden'; clear.disabled = !n;
+            clear.addEventListener('click', () => { selected.clear(); syncBoxes(); });
+            lead.appendChild(clear);
+            host.appendChild(lead);
+            TAGS.forEach(([attr, label]) => {
+                const row = document.createElement('div');
+                row.className = 'tagRow'; row.dataset.attr = attr;
+                const name = document.createElement('span'); name.className = 'tagName'; name.textContent = label;
+                row.appendChild(name);
+                const chip = (text, value, on, aria) => {
+                    const c = document.createElement('button');
+                    c.type = 'button'; c.className = 'chip'; c.textContent = text; c.dataset.value = value;
+                    c.setAttribute('aria-pressed', on ? 'true' : 'false');
+                    if (aria) c.setAttribute('aria-label', aria);
+                    row.appendChild(c);
+                    return c;
+                };
+                // a chip tapped while a new value is still being typed means "this one instead": the half-typed value is dropped
+                const drop = (e) => { const open = host.querySelector('.chipInput'); if (open && open.cancel) { e.preventDefault(); open.cancel(); } };
+                tagValues(attr).forEach((v) => { const c = chip(v, v, !n && tagNext[attr] === v); c.addEventListener('pointerdown', drop); c.addEventListener('click', () => setTag(attr, v)); });
+                chip('none', '', false, label + ': none').addEventListener('click', () => setTag(attr, '', true));
+                const plus = chip('+ new', '+', false, 'Add a new ' + label.toLowerCase());
+                plus.addEventListener('click', () => {
+                    const input = document.createElement('input');
+                    input.type = 'text'; input.className = 'chipInput'; input.maxLength = 60; input.autocomplete = 'off';
+                    input.placeholder = 'new ' + label.toLowerCase(); input.setAttribute('aria-label', 'New ' + label.toLowerCase());
+                    let done = false;
+                    input.cancel = () => { done = true; input.blur(); input.remove(); renderTagBars(); };
+                    const finish = () => {
+                        if (done) return;
+                        done = true;
+                        let v = input.value.trim().slice(0, 60);
+                        // the same word in other capitals is the value that exists already
+                        const known = tagValues(attr).find((x) => x.toLowerCase() === v.toLowerCase());
+                        if (known) v = known;
+                        input.blur();
+                        input.remove();
+                        if (v) {
+                            tagExtra[attr] = [v].concat(tagExtra[attr].filter((x) => x.toLowerCase() !== v.toLowerCase())).slice(0, 20);
+                            saveTags();
+                            setTag(attr, v, true);
+                        }
+                        renderTagBars();
+                    };
+                    input.addEventListener('change', finish);
+                    input.addEventListener('blur', () => setTimeout(finish, 0));
+                    plus.replaceWith(input);
+                    input.focus();
+                });
+                host.appendChild(row);
+            });
+        });
+    }
+
     // ---------- sessions and places ----------
     const SESSION_GAP_MIN = 30;
     // A measurement made within half an hour of the previous one continues that session; otherwise a new one starts
@@ -1317,8 +1507,9 @@
         const host = $('savedList');
         // the list is rebuilt while a note may be being typed (a location arrives): keep the cursor where it was
         const active = document.activeElement;
-        const typing = active && active.classList && (active.classList.contains('recNote') || active.classList.contains('sessNote'))
-            ? { cls: active.classList.contains('recNote') ? 'recNote' : 'sessNote', id: active.dataset.id, at: active.selectionStart, value: active.value, was: active.dataset.was || '', ids: active.dataset.ids || '' } : null;
+        const noteClass = active && active.classList ? ['recNote', 'sessNote', 'posNote'].find((c) => active.classList.contains(c)) : null;
+        const typing = noteClass
+            ? { cls: noteClass, id: active.dataset.id, at: active.selectionStart, value: active.value, was: active.dataset.was || '', ids: active.dataset.ids || '' } : null;
         // session notes typed but not yet applied are applied now, except the one still being typed, which is carried over as it is
         commitSessionNotes(typing && typing.cls === 'sessNote' ? active : null);
         rebuilding = true;      // fields removed from the page fire 'change' and 'blur' in some browsers: those are not the user's
@@ -1328,18 +1519,30 @@
             summaries();
             // the newest few are also listed right under the chart, so each new measurement is seen to arrive
             $('recentBox').hidden = saved.length === 0;
+            const recentAt = $('recentList').scrollTop;
             $('recentList').textContent = '';
-            saved.slice(0, 5).forEach((rec) => {
+            // while a session is being measured, all of it is listed (it is what gets tagged); otherwise the newest five
+            const liveId = saved[0] && saved[0].sessionId && Date.now() - new Date(saved[0].time).getTime() <= SESSION_GAP_MIN * 60000 ? saved[0].sessionId : null;
+            const recent = liveId ? saved.filter((r) => r.sessionId === liveId).slice(0, 60) : saved.slice(0, 5);
+            recent.forEach((rec) => {
+                const row = document.createElement('div');
+                row.className = 'recentRow';
+                row.appendChild(selBox(rec));
                 const b = document.createElement('button'), t = document.createElement('b');
                 b.type = 'button';
                 t.textContent = R.localParts(rec).time + ':' + R.localParts(rec).compact.slice(4);
                 b.appendChild(t);
-                b.appendChild(document.createTextNode(' ' + rec.kind + (rec.audio ? ' + sound' : '') + ' · ' + R.peakSummary(rec, 3) + (rec.note ? ' · ' + rec.note : '')));
+                b.appendChild(document.createTextNode(' ' + rec.kind + (rec.audio ? ' + sound' : '') + ' · ' + R.peakSummary(rec, 3)));
+                const tags = [tagText(rec), rec.note].filter(Boolean).join(' · ');
+                if (tags) { const g = document.createElement('span'); g.className = 'flag-todo'; g.textContent = ' · ' + tags; b.appendChild(g); }
                 const bad = flags(rec).filter((f) => f[1] === 'bad').map((f) => f[0]);
                 if (bad.length) { const w = document.createElement('span'); w.className = 'flag-bad'; w.textContent = ' · ' + bad.join(' · '); b.appendChild(w); }
                 b.addEventListener('click', () => showRecord(rec));
-                $('recentList').appendChild(b);
+                row.appendChild(b);
+                $('recentList').appendChild(row);
             });
+            $('recentList').scrollTop = recentAt;
+            renderTagBars();
             const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
             const groups = R.sessions(saved, SESSION_GAP_MIN);
             $('shareAll').hidden = groups.length < 2;
@@ -1412,24 +1615,48 @@
                     send(sKey, () => { const now = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === sess.key) || sess; return prepareZip(now.records.slice().reverse(), now.fileBase); }, sendB, 'Send session as one zip');
                 });
                 sRow.appendChild(sendB);
+                const pickAll = el('button', 'Select all', 'ghost');
+                pickAll.type = 'button'; pickAll.dataset.role = 'pickSession';
+                pickAll.addEventListener('click', () => pickMany(sess.records));
+                sRow.appendChild(pickAll);
                 card.appendChild(sRow);
                 const list = el('div', null, 'recs');
-                sess.records.forEach((rec) => {
+                // positions in the order they were measured in: Position 1 is the first of the session
+                const positions = [];
+                sess.records.slice().reverse().forEach((r) => { if (r.positionId && !positions.includes(r.positionId)) positions.push(r.positionId); });
+                sess.records.forEach((rec, index) => {
+                    const pos = rec.positionId || null;
+                    const group = pos ? sess.records.filter((r) => r.positionId === pos) : null;
+                    if (pos && (index === 0 || sess.records[index - 1].positionId !== pos)) {
+                        const head = el('div', null, 'posGroup');
+                        head.dataset.id = pos;
+                        const newest = group[0];
+                        head.appendChild(el('span', 'Position ' + (positions.indexOf(pos) + 1) + ' · ' + group.length + (group.length === 1 ? ' measurement' : ' measurements') +
+                            (newest.motion ? ' · phone ' + newest.motion.pose : ''), 'hint posTitle'));
+                        const pick = el('button', 'Select', 'ghost pickBtn');
+                        pick.type = 'button'; pick.dataset.role = 'pickPosition';
+                        pick.setAttribute('aria-label', 'Select the ' + group.length + ' measurements of position ' + (positions.indexOf(pos) + 1));
+                        pick.addEventListener('click', () => pickMany(group));
+                        head.appendChild(pick);
+                        list.appendChild(head);
+                    }
                     const box = el('div', null, 'rec');
                     box.dataset.id = rec.id;
                     const p = R.localParts(rec);
                     const head = el('p', null, 'recHead');
-                    head.appendChild(el('b', p.time + ':' + p.compact.slice(4)));
+                    head.appendChild(selBox(rec));
+                    head.appendChild(el('b', ' ' + p.time + ':' + p.compact.slice(4)));
                     head.appendChild(document.createTextNode(' ' + (rec.kind === 'sweep' ? 'Sweep' : 'Clap') + ' ' + rec.fMin + '–' + rec.fMax + ' Hz · ' + R.peakSummary(rec, 4) +
                         (rec.audio ? ' · sound ' + rec.audio.durationS.toFixed(1) + ' s' : '')));
                     head.appendChild(el('span', placeKey(rec.sessionNote) && placeKey(rec.sessionNote) !== placeKey(sess.note) ? ' · place: ' + rec.sessionNote : '', 'flag-todo placeTag'));
+                    if (tagText(rec)) head.appendChild(el('span', ' · ' + tagText(rec), 'flag-todo recTags'));
                     box.appendChild(head);
                     box.appendChild(flagLine(rec));
                     // one line per measurement for a note about just that one, written as it is typed
                     const line = el('div', null, 'noteLine');
                     const note = document.createElement('input');
                     note.type = 'text'; note.className = 'recNote'; note.maxLength = 200; note.autocomplete = 'off';
-                    note.placeholder = 'Note for this one (optional)'; note.value = rec.note || ''; note.dataset.id = rec.id;
+                    note.placeholder = 'Typed note for this one (optional)'; note.value = rec.note || ''; note.dataset.id = rec.id;
                     note.setAttribute('aria-label', 'Note for the measurement of ' + p.time + ':' + p.compact.slice(4));
                     const writeNote = () => { noteTimers.delete(rec.id); putRecord(rec).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.')); };
                     // only this record's own lines are refreshed: rebuilding the list here would swallow the tap that ended the typing
@@ -1449,10 +1676,12 @@
                         clearTimeout(noteTimers.get(rec.id));
                         writeNote();
                     });
-                    line.appendChild(note);
-                    // location, photo and the buttons for this one measurement are folded away until asked for
+                    // a typed note, the location, the photo and the buttons for this one measurement are folded away until asked for
                     const more = el('div', null, 'more');
                     more.hidden = !openRecs.has(rec.id);
+                    more.appendChild(note);
+                    if (rec.note && more.hidden) line.appendChild(el('span', rec.note, 'hint recNoteShown'));
+                    else line.appendChild(el('span', '', 'recNoteShown'));
                     const toggle = el('button', more.hidden ? 'More' : 'Less', 'ghost moreBtn');
                     toggle.type = 'button'; toggle.dataset.role = 'more';
                     toggle.setAttribute('aria-expanded', more.hidden ? 'false' : 'true');
@@ -1464,6 +1693,7 @@
                     });
                     line.appendChild(toggle);
                     box.appendChild(line);
+                    if (pos) box.classList.add('inPos');
                     const loc = el('p', locationLine(rec) + ' ', 'hint');
                     loc.dataset.role = 'location';
                     if (rec.location) { const a = el('a', 'map'); a.href = R.mapsUrl(rec.location); a.target = '_blank'; a.rel = 'noopener'; loc.appendChild(a); }
@@ -1553,6 +1783,7 @@
         $('saveMsg').textContent = text;
         $('saveMsg').className = bad ? 'warn' : 'hint';
     }
+    let lastPosition = null;        // { sessionId, positionId } of the last measurement that had sensor data
     async function autoSave(interrupted) {
         if (curveState !== 'done') return;
         // a session note finished but not yet applied counts for this measurement; one still being typed is left to its typist
@@ -1562,10 +1793,21 @@
         // the phone's position is a note beside the measurement: nothing about it may stop the save
         let phone = null;
         try { phone = motionEnd(placeKey($('saveNote').value)); } catch (e) { phone = null; }
+        // Measurements made without moving the phone belong together: they share a position, and the note of that position.
+        const sid = currentSessionId();
+        // ("the previous one" is the last measurement the sensor saw, which need not be the newest row: that one may have been deleted)
+        let positionId = null;
+        try {
+            if (phone) {
+                const same = phone.movedSincePrevious === false && lastPosition && lastPosition.sessionId === sid;
+                positionId = same ? lastPosition.positionId : R.uuid();
+                lastPosition = { sessionId: sid, positionId };
+            }
+        } catch (e) { positionId = null; }
         const id = kind === 'sweep' ? sweepId : null;       // the same id as its checkpoint, so a recovery can never duplicate it
         if (kind === 'sweep') sweepId = null;
         const rec = R.makeRecord({
-            id, time: new Date(), kind, sessionNote: $('saveNote').value, sessionId: currentSessionId(), placeId: placeIdFor($('saveNote').value),
+            id, time: new Date(), kind, sessionNote: $('saveNote').value, sessionId: sid, placeId: placeIdFor($('saveNote').value), positionId, spot: tagNext.spot, direction: tagNext.direction,
             room: { name: settings.room, lengthM: d.L, widthM: d.W, heightM: d.H },
             tempC: settings.temp, fMin: settings.fMin, fMax: settings.fMax,
             sweepDurS: settings.sweepDur, speaker: settings.speaker,
@@ -1969,6 +2211,7 @@
         renderSaved();
         if (saved.length) askPersist();
         if (!loadFailed) { recoverDraft(); recoverCheckpoints(); }
+        try { expireTags(); if (!clapBusy) setClapButton(); } catch (e) { /* an extra */ }
     }
 
     // ---------- Tabs ----------
@@ -1979,6 +2222,7 @@
         if (byUser) commitSessionNotes();
         const changed = settings.tab !== name;
         if (byUser && !changed) return;     // tapping the open tab again must not disturb anything on it
+        if (byUser && selected.size) { selected.clear(); syncBoxes(); }      // ticks made on one tab must not act unseen on another
         settings.tab = name;
         if (byUser) save();
         CHOICES.tab.forEach((t) => {
@@ -2139,13 +2383,20 @@
     $('notice').addEventListener('click', () => { $('audioWarn').textContent = ''; $('micWarn').textContent = ''; tabMarks(); });   // a storage warning stays until the problem is gone
     $('sweep').addEventListener('click', toggleSweep);
     $('mic').addEventListener('click', toggleMic);
-    $('clap').addEventListener('click', recordClap);
+    // One tap is enough: if the microphone is off, it is turned on first and the clap recording follows.
+    $('clap').addEventListener('click', async () => {
+        if (!micOn && !micBusy && !clapBusy) {
+            await toggleMic();
+            if (!micOn) return;         // refused or failed: the reason is on the page
+        }
+        recordClap();
+    });
     try { $('saveNote').value = localStorage.getItem('pyramid-res-note') || ''; } catch (e) { /* no stored note */ }
     $('saveNote').addEventListener('input', noteTyped);      // on every keystroke: iOS may never send 'change'
     $('saveNote').addEventListener('change', noteTyped);
     const again = () => { if (loadFailed) loadSaved().then(retryUnstored); else retryUnstored(); };
     setInterval(again, 15000);
-    document.addEventListener('visibilitychange', () => { if (document.hidden) commitSessionNotes(); else again(); });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) commitSessionNotes(); else { again(); try { expireTags(); if (!clapBusy) setClapButton(); } catch (e) { /* an extra */ } } });
     window.addEventListener('pagehide', () => { commitSessionNotes(); });
     $('openSaved').addEventListener('click', () => showTab('saved', true));
     $('photoInput').addEventListener('change', photoChosen);
@@ -2176,6 +2427,7 @@
     // the phone-position extra is wired last of the optional things and can never stop the start-up
     try {
         motionLine();
+        motionAuto();
         ['motionAsk', 'motionAsk2'].forEach((id) => { const b = document.getElementById(id); if (b) b.addEventListener('click', motionEnable); });
         document.addEventListener('visibilitychange', () => { if (document.hidden) { motion.prev = null; motion.run = 0; } });
     } catch (e) { /* ignore */ }
