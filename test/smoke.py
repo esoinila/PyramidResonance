@@ -950,7 +950,7 @@ async def main():
         page, errors = await new_page(browser, url, pre="DeviceMotionEvent.requestPermission = () => (navigator.userActivation && navigator.userActivation.isActive) ? Promise.resolve('granted') : Promise.reject(new DOMException('needs a tap', 'NotAllowedError'));")
         await page.wait_for_function("!startGate.hidden", timeout=4000)
         check(await page.evaluate("startGate.getBoundingClientRect().height >= innerHeight - 1 && startGate.textContent.includes('Tap to start')"), 'where the phone must be asked, the app opens with one "Tap to start" screen')
-        await page.mouse.click(195, 400); await page.wait_for_timeout(400)
+        await page.keyboard.press('Tab'); await page.keyboard.press('Enter'); await page.wait_for_timeout(400)      # the start button by keyboard, as VoiceOver or a keyboard would
         check(await page.evaluate("startGate.hidden") and 'waiting for the motion sensor' in await page.evaluate("motionLine.textContent"), 'one tap closes it and the motion sensor is being listened to', await page.evaluate("motionLine.textContent"))
         await page.evaluate("""(() => { window.__g = [0, 0, 9.81]; window.__rot = 0;
             window.__sensor = setInterval(() => window.dispatchEvent(new DeviceMotionEvent('devicemotion', { accelerationIncludingGravity: { x: window.__g[0], y: window.__g[1], z: window.__g[2] },
@@ -963,6 +963,13 @@ async def main():
         check(await page.evaluate("clap.textContent") == 'Record a clap · saddle', 'the clap button says which spot the next measurement will carry', await page.evaluate("clap.textContent"))
         gap = await page.evaluate("document.querySelector('#tagBar .chip').getBoundingClientRect().top - clap.getBoundingClientRect().bottom")
         check(0 < gap < 220 and await page.evaluate("document.querySelector('#tagBar .tagRow[data-attr=direction]').getBoundingClientRect().bottom < innerHeight"), 'the spot and direction values sit right under the clap button, on the same screen', gap)
+        # nothing under the finger moves when a value is picked or a row is ticked
+        where = "JSON.stringify(['#mic', '#clap', '#tagBar .tagRow[data-attr=spot] .chip', '#tagBar .tagRow[data-attr=direction] .chip', '#chart'].map(s => Math.round(document.querySelector(s).getBoundingClientRect().top)))"
+        w0 = await page.evaluate(where)
+        await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value=""]'); await page.wait_for_timeout(200)
+        w1 = await page.evaluate(where)
+        await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="saddle"]'); await page.wait_for_timeout(200)
+        check(w0 == w1 == await page.evaluate(where), 'picking or clearing a value moves neither the buttons, the chips nor the chart', w0 + ' ' + w1)
         # a value typed in a different spelling is the existing value; a chip tapped while typing wins over the half-typed text
         await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="+"]')
         await page.keyboard.type('SADDLE'); await page.keyboard.press('Enter'); await page.wait_for_timeout(300)
@@ -1011,10 +1018,11 @@ async def main():
         check(await page.evaluate("[...document.querySelectorAll('#recentList .recentRow')].length") == 4 and 'window sill' in await page.evaluate("recentList.children[0].textContent") and await page.evaluate("document.querySelectorAll('#recentList .recSel').length") == 4,
               'the list under the chart shows the whole session with tick boxes and each spot, without leaving the Measure tab')
         # earlier measurements get a value by ticking them and tapping it: here straight on the Measure tab
+        w0 = await page.evaluate(where)
         box = await page.evaluate("JSON.stringify((r => [Math.round(r.width), Math.round(r.height)])(document.querySelector('#recentList .selWrap').getBoundingClientRect()))")
-        check(box == '[44,44]', 'a tick box has a finger-sized target', box)
+        check(all(v >= 44 for v in json.loads(box)), 'a tick box has a finger-sized target', box)
         await page.click('#recentList .recentRow:nth-child(3) .selWrap'); await page.click('#recentList .recentRow:nth-child(4) .selWrap')
-        check('2 selected' in await page.evaluate("document.querySelector('#tagBar .tagLead').textContent"), 'ticking rows turns the value bar to "2 selected"')
+        check('2 selected' in await page.evaluate("document.querySelector('#tagBar .tagLead').textContent") and (lambda a, b: [v - a[0] for v in a] == [v - b[0] for v in b])(json.loads(await page.evaluate(where)), json.loads(w0)), 'ticking rows turns the value bar to "2 selected" without moving anything', await page.evaluate(where) + ' vs ' + w0)
         await page.click('#tagBar .tagRow[data-attr=direction] .chip[data-value="+"]')
         await page.keyboard.type('towards door'); await page.keyboard.press('Enter'); await page.wait_for_timeout(500)
         got = await page.evaluate(rows)

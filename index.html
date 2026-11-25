@@ -90,7 +90,10 @@
         #stripStop { flex: none; width: 48px; min-height: 44px; padding: 0; font-size: 1.1rem; }
         #notice { margin: 8px 0 0; min-height: 0; }
         .tagBar { margin: 8px 0; }
-        .tagLead { margin: 0 0 4px; }
+        .tagLead { display: flex; align-items: center; gap: 8px; min-height: 44px; margin: 0 0 4px; }
+        .tagLead .hint { flex: 1; margin: 0; }
+        #mic, #clap { height: 92px; overflow: hidden; line-height: 1.25; }
+        .recentRow .selWrap { margin: 0; align-self: stretch; height: auto; min-height: 44px; }
         .tagRow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
         .tagName { color: var(--muted); font-size: .85rem; min-width: 4.6em; }
         .chip { width: auto; min-height: 40px; padding: 6px 14px; font-size: .9rem; font-weight: 400; background: transparent; color: var(--text); border: 1px solid var(--line); border-radius: 20px; }
@@ -141,7 +144,7 @@
         #startGate { position: fixed; inset: 0; z-index: 50; width: 100%; min-height: 100%; border: 0; border-radius: 0; background: var(--bg); color: var(--text); cursor: pointer;
             display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 24px; text-align: center; font-weight: 400; }
         #startGate .gateTitle { font-size: 1.6rem; font-weight: 700; }
-        #startGate .gateTap { font-size: 1.3rem; font-weight: 700; color: #000; background: var(--gold); border-radius: 14px; padding: 16px 34px; }
+        #startGate .gateTap { width: auto; font-size: 1.3rem; font-weight: 700; color: #000; background: var(--gold); border: 0; border-radius: 14px; padding: 16px 34px; }
         #startGate .gateHint { font-size: .9rem; color: var(--muted); max-width: 30em; line-height: 1.45; }
         .posGroup { border-top: 1px solid var(--gold); margin-top: 10px; padding-top: 8px; }
         .posTitle { color: var(--gold); margin: 0 0 4px; }
@@ -168,9 +171,9 @@
 
 <body>
     <!-- Shown by the script only where the phone must be asked, by a tap, for its motion sensor. One tap, before any measuring. -->
-    <div id="startGate" role="button" tabindex="0" aria-label="Tap to start" hidden>
+    <div id="startGate" hidden>
         <span class="gateTitle">Pyramid Resonance</span>
-        <span class="gateTap">Tap to start</span>
+        <button id="gateStart" type="button" class="gateTap">Tap to start</button>
         <span class="gateHint">The phone will ask whether the app may use Motion &amp; Orientation. With "Allow", each measurement notes how the phone lay, and measurements made without moving it are grouped. Measuring works either way.</span>
         <button id="gateSkip" type="button" class="ghost">Start without the motion sensor</button>
     </div>
@@ -208,8 +211,6 @@
             <div id="meter"><div id="meterBar"></div></div>
             <div id="meterText">Microphone off</div>
             <div id="tagBar" class="tagBar"></div>
-            <p class="hint">Easiest check: tap "Record a clap" (it turns the microphone on by itself), wait for "now" and clap once, sharply. The room rings at its own notes and no speaker is needed.</p>
-            <p class="hint">Nothing is sent anywhere unless you send it. Every clap is saved on this phone with its sound, also one that is cut short. The one thing the app cannot save is a clap during whose 4 seconds the phone shuts the app down completely; a sweep in that case is recovered up to its last two seconds at the next start. On an iPhone, turning the microphone on can move the sound from a Bluetooth speaker to the phone itself. If the tone gets quiet, turn the microphone off and judge by ear, or use the clap.</p>
             <p class="hint" id="motionLine2" role="status"></p>
             <div class="row"><button id="motionAsk2" class="ghost" type="button" style="visibility:hidden" disabled>Also note the phone's position</button></div>
             <p class="warn" id="micWarn"></p>
@@ -232,6 +233,12 @@
                     <datalist id="placeList"></datalist>
                 </label>
             </div>
+        </div>
+
+        <div class="card">
+            <h2>How to measure</h2>
+            <p class="hint">Easiest check: tap "Record a clap" (it turns the microphone on by itself), wait for "now" and clap once, sharply. The room rings at its own notes and no speaker is needed.</p>
+            <p class="hint">Nothing is sent anywhere unless you send it. Every clap is saved on this phone with its sound, also one that is cut short. The one thing the app cannot save is a clap during whose 4 seconds the phone shuts the app down completely; a sweep in that case is recovered up to its last two seconds at the next start. On an iPhone, turning the microphone on can move the sound from a Bluetooth speaker to the phone itself. If the tone gets quiet, turn the microphone off and judge by ear, or use the clap.</p>
         </div>
 
         <div class="card">

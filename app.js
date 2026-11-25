@@ -374,6 +374,7 @@
             abortSweep();
             keepPartialSweep();      // never start over the top of an unsaved one
             recording = micOn;
+            try { if (selected.size) { selected.clear(); syncBoxes(); } } catch (e) { /* an extra */ }
             if (recording) { try { motionBegin(1000); } catch (e) { /* an extra */ } }
             if (recording) { rawAudio = null; curve = []; curveState = 'none'; viewing = null; curveKind = 'sweep'; disturbed = false; sweepId = null; checkpointAt = 0; $('peaks').textContent = ''; }
             lastReadF = 0;
@@ -593,7 +594,7 @@
             const skip = document.getElementById('gateSkip');
             if (skip) skip.addEventListener('click', (e) => { e.stopPropagation(); g.hidden = true; motionLine(); });
             g.addEventListener('click', go);
-            document.addEventListener('keydown', (e) => { if (e.key === 'Escape') g.hidden = true; });
+            document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !g.hidden) { g.hidden = true; motionLine(); } });
             g.hidden = false;
             try { g.focus(); } catch (e) { /* ignore */ }
         };
@@ -626,7 +627,6 @@
     }
     // skipMs: the start of a sweep is a tap on the screen, which must not count as moving during it
     function motionBegin(skipMs) {
-        try { if (selected.size) { selected.clear(); syncBoxes(); } } catch (e) { /* an extra */ }    // a new measurement: ticks are over
         if (motion.measuring && motion.duringMs > motion.betweenMs) motion.betweenMs = motion.duringMs;    // one that ended without being saved
         motion.measuring = true;
         motion.run0 = motion.run;       // handling that began before this measurement is not "during" it
@@ -770,6 +770,8 @@
 
     async function recordClap() {
         if (!micOn || clapBusy || micBusy) return;
+        // ticks end with the tap that starts a measurement, not some seconds later when the recording begins
+        try { if (selected.size) { selected.clear(); syncBoxes(); } } catch (e) { /* an extra */ }
         if (!(settings.fMax > settings.fMin)) {
             $('micWarn').textContent = 'Set "To Hz" higher than "From Hz" on the Setup tab first.';
             return;
@@ -1228,19 +1230,21 @@
         tagNext.spot = ''; tagNext.direction = '';
         saveTags();
         renderTagBars();
+        try { saveNote('The spot and direction picked in an earlier session were cleared: pick them again for this one.'); } catch (e) { /* an extra */ }
     }
     // the button says what the next measurement will be labelled with, so a left-over value cannot go unnoticed
     function clapLabel() {
         const t = [tagNext.spot, tagNext.direction].filter(Boolean).join(', ');
         return 'Record a clap' + (t ? ' · ' + t : ' (4 s)');
     }
+    // In a fixed order (first used first), so that a chip never changes place when it is picked
     function tagValues(attr) {
         const seen = new Set(), out = [];
         const add = (v) => { v = String(v || '').trim(); const k = v.toLowerCase(); if (v && !seen.has(k)) { seen.add(k); out.push(v); } };
+        for (let i = saved.length - 1; i >= 0; i--) add(saved[i][attr]);       // oldest measurement first
+        tagExtra[attr].slice().reverse().forEach(add);                          // then the ones added by hand, in the order added
         add(tagNext[attr]);
-        saved.forEach((r) => add(r[attr]));
-        tagExtra[attr].forEach(add);
-        return out.slice(0, 14);
+        return out.slice(-16);
     }
     const picked = () => saved.filter((r) => selected.has(r.id));
     // value '' clears. force: set, never toggle off (used when a value has just been typed)
@@ -1295,9 +1299,19 @@
             const typing = host.contains(document.activeElement) && document.activeElement.tagName === 'INPUT';
             if (typing) return;         // a new value is being typed in this bar: it is redrawn when that is done
             host.textContent = '';
-            const lead = document.createElement('p');
-            lead.className = 'hint tagLead';
-            lead.textContent = n ? n + ' selected: tap a value to give it to ' + (n === 1 ? 'it' : 'them') + '.' : 'For the next measurements. To change earlier ones, tick their boxes first.';
+            const lead = document.createElement('div');
+            lead.className = 'tagLead';
+            const say = document.createElement('span');
+            say.className = 'hint';
+            say.textContent = n ? n + ' selected: tap a value to give it to ' + (n === 1 ? 'it' : 'them') + '.' : 'For the next measurements. To change earlier ones, tick their boxes first.';
+            lead.appendChild(say);
+            // always there, so that nothing below moves when the first row is ticked
+            const clear = document.createElement('button');
+            clear.type = 'button'; clear.className = 'ghost pickBtn'; clear.textContent = 'Clear'; clear.dataset.role = 'clearSelection';
+            clear.setAttribute('aria-label', 'Clear the selection');
+            clear.style.visibility = n ? 'visible' : 'hidden'; clear.disabled = !n;
+            clear.addEventListener('click', () => { selected.clear(); syncBoxes(); });
+            lead.appendChild(clear);
             host.appendChild(lead);
             TAGS.forEach(([attr, label]) => {
                 const row = document.createElement('div');
@@ -1315,7 +1329,7 @@
                 // a chip tapped while a new value is still being typed means "this one instead": the half-typed value is dropped
                 const drop = (e) => { const open = host.querySelector('.chipInput'); if (open && open.cancel) { e.preventDefault(); open.cancel(); } };
                 tagValues(attr).forEach((v) => { const c = chip(v, v, !n && tagNext[attr] === v); c.addEventListener('pointerdown', drop); c.addEventListener('click', () => setTag(attr, v)); });
-                if (n || tagNext[attr]) chip('none', '', false, label + ': none').addEventListener('click', () => setTag(attr, '', true));
+                chip('none', '', false, label + ': none').addEventListener('click', () => setTag(attr, '', true));
                 const plus = chip('+ new', '+', false, 'Add a new ' + label.toLowerCase());
                 plus.addEventListener('click', () => {
                     const input = document.createElement('input');
@@ -1346,12 +1360,6 @@
                 });
                 host.appendChild(row);
             });
-            if (n) {
-                const clear = document.createElement('button');
-                clear.type = 'button'; clear.className = 'ghost pickBtn'; clear.textContent = 'Clear selection'; clear.dataset.role = 'clearSelection';
-                clear.addEventListener('click', () => { selected.clear(); syncBoxes(); });
-                host.appendChild(clear);
-            }
         });
     }
 
@@ -2203,7 +2211,7 @@
         renderSaved();
         if (saved.length) askPersist();
         if (!loadFailed) { recoverDraft(); recoverCheckpoints(); }
-        try { expireTags(); setClapButton(); } catch (e) { /* an extra */ }
+        try { expireTags(); if (!clapBusy) setClapButton(); } catch (e) { /* an extra */ }
     }
 
     // ---------- Tabs ----------
