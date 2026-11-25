@@ -89,6 +89,20 @@
         #tabs { flex: 1; min-width: 0; }
         #stripStop { flex: none; width: 48px; min-height: 44px; padding: 0; font-size: 1.1rem; }
         #notice { margin: 8px 0 0; min-height: 0; }
+        .tagBar { margin: 8px 0; }
+        .tagLead { margin: 0 0 4px; }
+        .tagRow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
+        .tagName { color: var(--muted); font-size: .85rem; min-width: 4.6em; }
+        .chip { width: auto; min-height: 40px; padding: 6px 14px; font-size: .9rem; font-weight: 400; background: transparent; color: var(--text); border: 1px solid var(--line); border-radius: 20px; }
+        .chip[aria-pressed="true"] { background: var(--gold); color: #000; border-color: var(--gold); font-weight: 700; }
+        .chipInput { width: 9em; min-height: 40px; margin: 0; }
+        .pickBtn { width: auto; min-height: 40px; padding: 6px 12px; font-size: .85rem; }
+        .recSel { width: 24px; height: 24px; margin: 0 6px 0 0; vertical-align: middle; accent-color: var(--gold); flex: none; }
+        .recentRow { display: flex; align-items: center; border-top: 1px solid var(--line); }
+        .recentRow button { flex: 1; border-top: 0 !important; }
+        .posGroup { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .recNoteShown { flex: 1; min-width: 0; margin: 0; }
+        #recentList { max-height: 46vh; overflow-y: auto; }
         #recentList button { display: block; width: 100%; text-align: left; background: transparent; color: var(--text); border: 0; border-top: 1px solid var(--line); border-radius: 0; padding: 10px 2px; min-height: 44px; font-size: .9rem; font-weight: 400; font-variant-numeric: tabular-nums; }
         #recentList button b { color: var(--gold); }
         .flags { margin: 4px 0; }
@@ -122,6 +136,14 @@
         th, td { text-align: left; padding: 5px 4px; border-bottom: 1px solid var(--line); }
         th { color: var(--muted); font-weight: 400; }
         input[type=text] { padding: 10px; font-size: 1rem; background: #222; color: #fff; border: 1px solid var(--gold-dim); border-radius: 8px; width: 100%; min-height: 44px; }
+        #startGate { position: fixed; inset: 0; z-index: 50; width: 100%; min-height: 100%; border: 0; border-radius: 0; background: var(--bg); color: var(--text);
+            display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 24px; text-align: center; font-weight: 400; }
+        #startGate .gateTitle { font-size: 1.6rem; font-weight: 700; }
+        #startGate .gateTap { font-size: 1.3rem; font-weight: 700; color: #000; background: var(--gold); border-radius: 14px; padding: 16px 34px; }
+        #startGate .gateHint { font-size: .9rem; color: var(--muted); max-width: 30em; line-height: 1.45; }
+        .posGroup { border-top: 1px solid var(--gold); margin-top: 10px; padding-top: 8px; }
+        .posTitle { color: var(--gold); margin: 0 0 4px; }
+        .rec.inPos { border-top: 1px dashed var(--line); margin-left: 10px; }
         .session { border-top: 2px solid var(--gold); padding: 12px 0 4px; margin-top: 10px; }
         .session:first-child { margin-top: 0; }
         .sessTitle { font-size: 1.05rem; color: var(--gold); font-variant-numeric: tabular-nums; }
@@ -143,6 +165,12 @@
 </head>
 
 <body>
+    <!-- Shown by the script only where the phone must be asked, by a tap, for its motion sensor. One tap, before any measuring. -->
+    <button id="startGate" type="button" hidden>
+        <span class="gateTitle">Pyramid Resonance</span>
+        <span class="gateTap">Tap to start</span>
+        <span class="gateHint">The phone will ask whether the app may use Motion &amp; Orientation. With "Allow", each measurement notes how the phone lay, and measurements made without moving it are grouped so that one note covers them all. Measuring works either way.</span>
+    </button>
     <main>
         <h1>Pyramid Resonance</h1>
         <p class="sub">Find the notes a stone room rings at</p>
@@ -172,11 +200,11 @@
             <h2>Microphone</h2>
             <div class="row">
                 <button id="mic" class="ghost">Turn microphone on</button>
-                <button id="clap" class="ghost" disabled>Record a clap (4 s)</button>
+                <button id="clap" class="ghost">Record a clap (4 s)</button>
             </div>
             <div id="meter"><div id="meterBar"></div></div>
             <div id="meterText">Microphone off</div>
-            <p class="hint">Easiest check: turn the microphone on, stop any tone, and record one sharp clap. The room rings at its own notes and no speaker is needed.</p>
+            <p class="hint">Easiest check: tap "Record a clap" (it turns the microphone on by itself), wait for "now" and clap once, sharply. The room rings at its own notes and no speaker is needed.</p>
             <p class="hint">Nothing is sent anywhere unless you send it. Every clap is saved on this phone with its sound, also one that is cut short. The one thing the app cannot save is a clap during whose 4 seconds the phone shuts the app down completely; a sweep in that case is recovered up to its last two seconds at the next start. On an iPhone, turning the microphone on can move the sound from a Bluetooth speaker to the phone itself. If the tone gets quiet, turn the microphone off and judge by ear, or use the clap.</p>
             <p class="hint" id="motionLine2" role="status"></p>
             <div class="row"><button id="motionAsk2" class="ghost" type="button" style="visibility:hidden" disabled>Also note the phone's position</button></div>
@@ -190,6 +218,7 @@
             <div id="peaks"></div>
             <div id="saveBox">
                 <p class="hint" id="saveMsg" role="status">Every measurement is saved on this phone by itself the moment it finishes, a clap with its sound. Nothing needs to be tapped. They collect on the Saved tab at the top of the page, where you can send them.</p>
+                <div id="tagBar" class="tagBar"></div>
                 <div id="recentBox" hidden>
                     <p class="hint" id="recentTitle" style="margin-bottom:4px"></p>
                     <div id="recentList"></div>
@@ -268,6 +297,7 @@
         <div class="card">
             <h2>Saved measurements</h2>
             <p class="hint" id="savedSummary" style="margin-top:0"></p>
+            <div id="tagBarSaved" class="tagBar"></div>
             <div id="savedList"></div>
             <p class="hint" id="savedEmpty">Nothing saved yet. Every clap and every measured sweep is stored here by itself the moment it finishes, with the time, your location and, for a clap, its sound. You can add a photo and send it by mail or to another app.</p>
             <div class="row mt"><button id="shareAll" class="ghost" hidden>Send everything as one zip</button></div>

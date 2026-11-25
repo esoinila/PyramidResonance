@@ -72,10 +72,14 @@
       kind: input.kind === 'sweep' ? 'sweep' : 'clap',
       note: String(input.note || '').trim().slice(0, 200),                 // about this one measurement
       sessionNote: String(input.sessionNote || '').trim().slice(0, 200),   // the place or subject of the whole session
+      // picked from a short set of values instead of typed each time:
+      spot: String(input.spot || '').trim().slice(0, 60),                 // where in the place the phone was ("saddle", "window sill")
+      direction: String(input.direction || '').trim().slice(0, 60),       // which way it pointed or lay
       // Stable identities, so that links survive when names are edited or this format grows:
       uuid: isUuid(input.uuid) ? input.uuid : uuid(),                    // this measurement
       sessionId: isUuid(input.sessionId) ? input.sessionId : null,       // the session it was made in
       placeId: isUuid(input.placeId) ? input.placeId : null,             // the place, whatever it is called now
+      positionId: isUuid(input.positionId) ? input.positionId : null,    // measurements made without moving the phone share one (from the motion sensor; null without it)
       location: cleanLocation(input.location),
       locationStatus: input.locationStatus || 'pending',   // pending | ok | denied | unavailable | off
       room: input.room || null,
@@ -114,7 +118,7 @@
   // The date and time come first and the whole stem is short, because a phone's file list
   // shows only the first twenty-odd characters: "2026-11-23_120106_clap".
   function fileBase(rec) {
-    const p = localParts(rec), slug = slugOf(rec.note, 16);     // short: a long name pushes the time out of sight
+    const p = localParts(rec), slug = slugOf(rec.spot || rec.note, 16);     // short: a long name pushes the time out of sight
     return p.date + '_' + p.compact + '_' + (rec.kind === 'sweep' ? 'sweep' : 'clap') + (slug ? '_' + slug : '');
   }
 
