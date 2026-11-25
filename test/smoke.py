@@ -960,6 +960,19 @@ async def main():
         await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="+"]')
         await page.keyboard.type('saddle'); await page.keyboard.press('Enter'); await page.wait_for_timeout(300)
         check(await page.evaluate("document.querySelector('#tagBar .tagRow[data-attr=spot] .chip[aria-pressed=true]').textContent") == 'saddle', 'a new spot is added once and is then the spot for the next measurements')
+        check(await page.evaluate("clap.textContent") == 'Record a clap · saddle', 'the clap button says which spot the next measurement will carry', await page.evaluate("clap.textContent"))
+        gap = await page.evaluate("document.querySelector('#tagBar .chip').getBoundingClientRect().top - clap.getBoundingClientRect().bottom")
+        check(0 < gap < 220 and await page.evaluate("document.querySelector('#tagBar .tagRow[data-attr=direction]').getBoundingClientRect().bottom < innerHeight"), 'the spot and direction values sit right under the clap button, on the same screen', gap)
+        # a value typed in a different spelling is the existing value; a chip tapped while typing wins over the half-typed text
+        await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="+"]')
+        await page.keyboard.type('SADDLE'); await page.keyboard.press('Enter'); await page.wait_for_timeout(300)
+        check(await page.evaluate("[...document.querySelectorAll('#tagBar .tagRow[data-attr=spot] .chip')].map(c => c.textContent).join()") == 'saddle,none,+ new', 'the same word in other capitals does not become a second value', await page.evaluate("[...document.querySelectorAll('#tagBar .tagRow[data-attr=spot] .chip')].map(c => c.textContent).join()"))
+        await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="+"]')
+        await page.keyboard.type('oops')
+        await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="saddle"]'); await page.wait_for_timeout(300)
+        vals = await page.evaluate("[...document.querySelectorAll('#tagBar .tagRow[data-attr=spot] .chip')].map(c => c.textContent + (c.getAttribute('aria-pressed') === 'true' ? '*' : '')).join()")
+        check('oops' not in vals and await page.evaluate("document.querySelector('#tagBar .chipInput')") is None, 'a chip tapped while a new value is being typed drops the half-typed value', vals)
+        if 'saddle*' not in vals: await page.click('#tagBar .tagRow[data-attr=spot] .chip[data-value="saddle"]')
         # one tap on "Record a clap" with the microphone off: it turns the microphone on and records
         check(await page.evaluate("meterText.textContent") == 'Microphone off', '(test setup) the microphone is off')
         await page.click('#clap')
@@ -998,13 +1011,19 @@ async def main():
         check(await page.evaluate("[...document.querySelectorAll('#recentList .recentRow')].length") == 4 and 'window sill' in await page.evaluate("recentList.children[0].textContent") and await page.evaluate("document.querySelectorAll('#recentList .recSel').length") == 4,
               'the list under the chart shows the whole session with tick boxes and each spot, without leaving the Measure tab')
         # earlier measurements get a value by ticking them and tapping it: here straight on the Measure tab
-        await page.click('#recentList .recentRow:nth-child(3) .recSel'); await page.click('#recentList .recentRow:nth-child(4) .recSel')
+        box = await page.evaluate("JSON.stringify((r => [Math.round(r.width), Math.round(r.height)])(document.querySelector('#recentList .selWrap').getBoundingClientRect()))")
+        check(box == '[44,44]', 'a tick box has a finger-sized target', box)
+        await page.click('#recentList .recentRow:nth-child(3) .selWrap'); await page.click('#recentList .recentRow:nth-child(4) .selWrap')
         check('2 selected' in await page.evaluate("document.querySelector('#tagBar .tagLead').textContent"), 'ticking rows turns the value bar to "2 selected"')
         await page.click('#tagBar .tagRow[data-attr=direction] .chip[data-value="+"]')
         await page.keyboard.type('towards door'); await page.keyboard.press('Enter'); await page.wait_for_timeout(500)
         got = await page.evaluate(rows)
         check([g[1] for g in got] == ['towards door', 'towards door', '', ''] and await page.evaluate("document.querySelectorAll('.recSel:checked').length") == 0
               and await page.evaluate("document.querySelector('#tagBar .tagRow[data-attr=direction] .chip[aria-pressed=true]')") is None, 'a value tapped with rows ticked goes to those rows only, and the ticks clear', [g[1] for g in got])
+        # ticks do not follow to another tab, where they could not be seen
+        await page.click('#recentList .recentRow:nth-child(1) .selWrap')
+        await page.click('#tabBtn-saved')
+        check(await page.evaluate("document.querySelectorAll('.recSel:checked').length") == 0 and 'next measurements' in await page.evaluate("document.querySelector('#tagBarSaved .tagLead').textContent"), 'switching tabs clears the ticks')
         # ... and on the Saved tab by position: one tap selects everything measured in that position
         heads = await page.evaluate("[...document.querySelectorAll('#savedList .posGroup .posTitle')].map(e => e.textContent)")
         check(len(heads) == 2 and heads[0].startswith('Position 2 · 2 measurements · phone upright') and heads[1].startswith('Position 1 · 2 measurements · phone flat, screen up'), 'the Saved tab groups the rows by phone position', heads)
@@ -1023,8 +1042,17 @@ async def main():
         await page.evaluate("clearInterval(window.__sensor)")
         await page.reload(); await page.wait_for_timeout(700)
         check(await page.evaluate("document.querySelector('#tagBar .tagRow[data-attr=spot] .chip[aria-pressed=true]').textContent") == 'window sill' and await page.evaluate("!startGate.hidden"), 'the picked spot is remembered over a restart (and the phone is asked again, as an iPhone does)')
+        await page.click('#gateSkip'); await page.wait_for_timeout(300)
+        check(await page.evaluate("startGate.hidden") and 'waiting' not in await page.evaluate("motionLine.textContent") and await page.evaluate("clap.textContent") == 'Record a clap · window sill',
+              'the start screen can be skipped; the app then works without the motion sensor', await page.evaluate("motionLine.textContent"))
         errors[:] = [e for e in errors if 'needs a tap' not in e]
         check(not errors, 'no page errors (tags and positions)', errors)
+        # a spot picked in a session that ended long ago is not carried into a new day
+        page, errors = await new_page(browser, url, pre="try { localStorage.setItem('pyramid-res-tags', JSON.stringify({ next: { spot: 'window sill', direction: 'north' }, extra: { spot: [], direction: [] }, setAt: Date.now() - 3 * 3600 * 1000 })); } catch (e) {}")
+        await page.wait_for_timeout(900)
+        check(await page.evaluate("document.querySelector('#tagBar .chip[aria-pressed=true]')") is None and await page.evaluate("clap.textContent") == 'Record a clap (4 s)'
+              and await page.evaluate("JSON.parse(localStorage.getItem('pyramid-res-tags')).next.spot") == '', 'a spot left over from an old session is dropped, not applied to the next clap', await page.evaluate("clap.textContent"))
+        check(not errors, 'no page errors (old tags)', errors)
 
         check(not errors, 'no page errors (no storage)', errors)
         await page.close()

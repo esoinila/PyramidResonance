@@ -590,7 +590,10 @@
             const g = document.getElementById('startGate');
             if (!g) return;
             const go = () => { try { motionEnable(); } catch (e) { /* an extra */ } g.hidden = true; };
+            const skip = document.getElementById('gateSkip');
+            if (skip) skip.addEventListener('click', (e) => { e.stopPropagation(); g.hidden = true; motionLine(); });
             g.addEventListener('click', go);
+            document.addEventListener('keydown', (e) => { if (e.key === 'Escape') g.hidden = true; });
             g.hidden = false;
             try { g.focus(); } catch (e) { /* ignore */ }
         };
@@ -623,6 +626,7 @@
     }
     // skipMs: the start of a sweep is a tap on the screen, which must not count as moving during it
     function motionBegin(skipMs) {
+        try { if (selected.size) { selected.clear(); syncBoxes(); } } catch (e) { /* an extra */ }    // a new measurement: ticks are over
         if (motion.measuring && motion.duringMs > motion.betweenMs) motion.betweenMs = motion.duringMs;    // one that ended without being saved
         motion.measuring = true;
         motion.run0 = motion.run;       // handling that began before this measurement is not "during" it
@@ -716,7 +720,7 @@
 
     function setClapButton(text) {
         $('clap').disabled = clapBusy || micBusy;       // with the microphone off, the tap turns it on first
-        $('clap').textContent = text || 'Record a clap (4 s)';
+        $('clap').textContent = text || clapLabel();
     }
 
     function meterTick() {
@@ -1212,7 +1216,24 @@
             if (t.extra && Array.isArray(t.extra[a])) tagExtra[a] = t.extra[a].filter((v) => typeof v === 'string').map((v) => v.slice(0, 60)).slice(0, 20);
         });
     } catch (e) { /* start with none */ }
-    const saveTags = () => { try { localStorage.setItem('pyramid-res-tags', JSON.stringify({ next: tagNext, extra: tagExtra })); } catch (e) { /* kept for this run */ } };
+    let tagSetAt = 0;       // when a value for the next measurements was last picked
+    try { tagSetAt = Number(JSON.parse(localStorage.getItem('pyramid-res-tags') || '{}').setAt) || 0; } catch (e) { tagSetAt = 0; }
+    const saveTags = () => { try { localStorage.setItem('pyramid-res-tags', JSON.stringify({ next: tagNext, extra: tagExtra, setAt: tagSetAt })); } catch (e) { /* kept for this run */ } };
+    // A picked spot or direction belongs to the session it was picked in. Once that session is over (nothing picked
+    // and nothing measured for half an hour) it is dropped, so that tomorrow's first clap elsewhere is not labelled with it.
+    function expireTags() {
+        if (!tagNext.spot && !tagNext.direction) return;
+        const last = Math.max(tagSetAt, saved[0] ? new Date(saved[0].time).getTime() : 0);
+        if (Date.now() - last <= SESSION_GAP_MIN * 60000) return;
+        tagNext.spot = ''; tagNext.direction = '';
+        saveTags();
+        renderTagBars();
+    }
+    // the button says what the next measurement will be labelled with, so a left-over value cannot go unnoticed
+    function clapLabel() {
+        const t = [tagNext.spot, tagNext.direction].filter(Boolean).join(', ');
+        return 'Record a clap' + (t ? ' · ' + t : ' (4 s)');
+    }
     function tagValues(attr) {
         const seen = new Set(), out = [];
         const add = (v) => { v = String(v || '').trim(); const k = v.toLowerCase(); if (v && !seen.has(k)) { seen.add(k); out.push(v); } };
@@ -1230,15 +1251,20 @@
                 if ((r[attr] || '') === value) return;
                 r[attr] = value;
                 touched(r);
-                putRecord(r).catch((e) => savedMsg('The change could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.'));
+                putRecord(r).catch((e) => {
+                    const why = 'The new ' + attr + ' of a measurement could not be stored (' + (e && e.message ? e.message : 'storage error') + '). It shows on the page but may be gone after a restart: pick it again.';
+                    savedMsg(why); saveNote(why, true);
+                });
             });
             selected.clear();
             renderSaved();
             return;
         }
         tagNext[attr] = !force && tagNext[attr] === value ? '' : value;
+        tagSetAt = Date.now();
         saveTags();
         renderTagBars();
+        if (!clapBusy) setClapButton();
     }
     function syncBoxes() {
         document.querySelectorAll('.recSel').forEach((b) => { b.checked = selected.has(b.dataset.id); });
@@ -1255,7 +1281,10 @@
         b.type = 'checkbox'; b.className = 'recSel'; b.dataset.id = rec.id; b.checked = selected.has(rec.id);
         b.setAttribute('aria-label', 'Select the measurement of ' + R.localParts(rec).time + ':' + R.localParts(rec).compact.slice(4));
         b.addEventListener('change', () => { if (b.checked) selected.add(rec.id); else selected.delete(rec.id); syncBoxes(); });
-        return b;
+        const wrap = document.createElement('label');       // the whole 44 px square takes the tap
+        wrap.className = 'selWrap';
+        wrap.appendChild(b);
+        return wrap;
     }
     const tagText = (rec) => TAGS.map(([a]) => rec[a]).filter(Boolean).join(' · ');
     function renderTagBars() {
@@ -1283,7 +1312,9 @@
                     row.appendChild(c);
                     return c;
                 };
-                tagValues(attr).forEach((v) => chip(v, v, !n && tagNext[attr] === v).addEventListener('click', () => setTag(attr, v)));
+                // a chip tapped while a new value is still being typed means "this one instead": the half-typed value is dropped
+                const drop = (e) => { const open = host.querySelector('.chipInput'); if (open && open.cancel) { e.preventDefault(); open.cancel(); } };
+                tagValues(attr).forEach((v) => { const c = chip(v, v, !n && tagNext[attr] === v); c.addEventListener('pointerdown', drop); c.addEventListener('click', () => setTag(attr, v)); });
                 if (n || tagNext[attr]) chip('none', '', false, label + ': none').addEventListener('click', () => setTag(attr, '', true));
                 const plus = chip('+ new', '+', false, 'Add a new ' + label.toLowerCase());
                 plus.addEventListener('click', () => {
@@ -1291,11 +1322,16 @@
                     input.type = 'text'; input.className = 'chipInput'; input.maxLength = 60; input.autocomplete = 'off';
                     input.placeholder = 'new ' + label.toLowerCase(); input.setAttribute('aria-label', 'New ' + label.toLowerCase());
                     let done = false;
+                    input.cancel = () => { done = true; input.blur(); input.remove(); renderTagBars(); };
                     const finish = () => {
                         if (done) return;
                         done = true;
-                        const v = input.value.trim().slice(0, 60);
+                        let v = input.value.trim().slice(0, 60);
+                        // the same word in other capitals is the value that exists already
+                        const known = tagValues(attr).find((x) => x.toLowerCase() === v.toLowerCase());
+                        if (known) v = known;
                         input.blur();
+                        input.remove();
                         if (v) {
                             tagExtra[attr] = [v].concat(tagExtra[attr].filter((x) => x.toLowerCase() !== v.toLowerCase())).slice(0, 20);
                             saveTags();
@@ -1475,6 +1511,7 @@
             summaries();
             // the newest few are also listed right under the chart, so each new measurement is seen to arrive
             $('recentBox').hidden = saved.length === 0;
+            const recentAt = $('recentList').scrollTop;
             $('recentList').textContent = '';
             // while a session is being measured, all of it is listed (it is what gets tagged); otherwise the newest five
             const liveId = saved[0] && saved[0].sessionId && Date.now() - new Date(saved[0].time).getTime() <= SESSION_GAP_MIN * 60000 ? saved[0].sessionId : null;
@@ -1496,6 +1533,7 @@
                 row.appendChild(b);
                 $('recentList').appendChild(row);
             });
+            $('recentList').scrollTop = recentAt;
             renderTagBars();
             const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
             const groups = R.sessions(saved, SESSION_GAP_MIN);
@@ -1737,6 +1775,7 @@
         $('saveMsg').textContent = text;
         $('saveMsg').className = bad ? 'warn' : 'hint';
     }
+    let lastPosition = null;        // { sessionId, positionId } of the last measurement that had sensor data
     async function autoSave(interrupted) {
         if (curveState !== 'done') return;
         // a session note finished but not yet applied counts for this measurement; one still being typed is left to its typist
@@ -1748,12 +1787,13 @@
         try { phone = motionEnd(placeKey($('saveNote').value)); } catch (e) { phone = null; }
         // Measurements made without moving the phone belong together: they share a position, and the note of that position.
         const sid = currentSessionId();
+        // ("the previous one" is the last measurement the sensor saw, which need not be the newest row: that one may have been deleted)
         let positionId = null;
         try {
             if (phone) {
-                const before = saved[0];
-                const same = phone.movedSincePrevious === false && before && before.sessionId === sid && R.isUuid(before.positionId);
-                positionId = same ? before.positionId : R.uuid();
+                const same = phone.movedSincePrevious === false && lastPosition && lastPosition.sessionId === sid;
+                positionId = same ? lastPosition.positionId : R.uuid();
+                lastPosition = { sessionId: sid, positionId };
             }
         } catch (e) { positionId = null; }
         const id = kind === 'sweep' ? sweepId : null;       // the same id as its checkpoint, so a recovery can never duplicate it
@@ -2163,6 +2203,7 @@
         renderSaved();
         if (saved.length) askPersist();
         if (!loadFailed) { recoverDraft(); recoverCheckpoints(); }
+        try { expireTags(); setClapButton(); } catch (e) { /* an extra */ }
     }
 
     // ---------- Tabs ----------
@@ -2173,6 +2214,7 @@
         if (byUser) commitSessionNotes();
         const changed = settings.tab !== name;
         if (byUser && !changed) return;     // tapping the open tab again must not disturb anything on it
+        if (byUser && selected.size) { selected.clear(); syncBoxes(); }      // ticks made on one tab must not act unseen on another
         settings.tab = name;
         if (byUser) save();
         CHOICES.tab.forEach((t) => {
@@ -2346,7 +2388,7 @@
     $('saveNote').addEventListener('change', noteTyped);
     const again = () => { if (loadFailed) loadSaved().then(retryUnstored); else retryUnstored(); };
     setInterval(again, 15000);
-    document.addEventListener('visibilitychange', () => { if (document.hidden) commitSessionNotes(); else again(); });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) commitSessionNotes(); else { again(); try { expireTags(); if (!clapBusy) setClapButton(); } catch (e) { /* an extra */ } } });
     window.addEventListener('pagehide', () => { commitSessionNotes(); });
     $('openSaved').addEventListener('click', () => showTab('saved', true));
     $('photoInput').addEventListener('change', photoChosen);
