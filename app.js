@@ -546,6 +546,7 @@
                 if (voice1.rec !== r || voice1.finishing) return;       // the finished note is being written: this copy must not replace it
                 const copy = Object.assign({}, rec, { interrupted: true, audio: { type: s.type, format: 'recorder', durationS: Number(secs.toFixed(1)), bytes: s.buffer.byteLength } });
                 await dbWrite(['records', 'audio'], (t) => { t.objectStore('audio').put({ type: s.type, buffer: s.buffer }, rec.id); return t.objectStore('records').put(copy); });
+                voice1.cpOk = true;
             } catch (e) { /* the note is still held in memory and saved when it ends */ }
             voice1.cpBusy = false;
         })();
@@ -559,7 +560,7 @@
         try {
             const r = new MediaRecorder(micStream);
             syncSessionNote();
-            voice1.chunks = []; voice1.t0 = Date.now(); voice1.mime = r.mimeType || ''; voice1.stopping = false; voice1.limit = false; voice1.cpAt = Date.now();
+            voice1.chunks = []; voice1.t0 = Date.now(); voice1.mime = r.mimeType || ''; voice1.stopping = false; voice1.limit = false; voice1.cpAt = Date.now(); voice1.cpOk = false;
             voice1.record = R.makeRecord({ time: new Date(voice1.t0), kind: 'voice', sessionNote: $('saveNote').value, sessionId: currentSessionId(), placeId: placeIdFor($('saveNote').value),
                 curve: [], peaks: [], app: BUILD, locationStatus: 'unavailable' });
             r.addEventListener('dataavailable', (e) => { if (e.data && e.data.size && voice1.rec === r) voice1.chunks.push(e.data); });
@@ -598,10 +599,13 @@
             if (!chunks.length) { saveNote('The voice note recorded nothing, so there was nothing to save.', true); return; }
             let s = null;
             try { s = await voiceSound(chunks); }
-            catch (e) { saveNote('The voice note could not be put together (' + (e && e.message ? e.message : 'error') + '). ' + (voice1.cpAt > voice1.t0 ? 'The copy written while recording is on the Saved tab after the app is opened again.' : ''), true); return; }
-            syncSessionNote();
-            rec.sessionNote = $('saveNote').value.trim().slice(0, NOTE_MAX);
-            rec.placeId = placeIdFor(rec.sessionNote);
+            catch (e) { saveNote('The voice note could not be put together (' + (e && e.message ? e.message : 'error') + '). ' + (voice1.cpOk ? 'The copy written while recording is on the Saved tab after the app is opened again.' : ''), true); return; }
+            // a new session started while speaking: the note stays with the session and description it was started in
+            if (currentSessionId() === rec.sessionId) {
+                syncSessionNote();
+                rec.sessionNote = $('saveNote').value.trim().slice(0, NOTE_MAX);
+                rec.placeId = placeIdFor(rec.sessionNote);
+            }
             rec.audio = { type: s.type, format: 'recorder', durationS: Number(secs.toFixed(1)), bytes: s.buffer.byteLength };
             saved.unshift(rec);
             saved.sort((a, b) => (a.time < b.time ? 1 : -1));
@@ -1489,36 +1493,68 @@
     // A session goes on until 30 minutes pass without a measurement, or until a new one is started on purpose.
     // Changing the description does not start a new session: the description is the session's, and may grow as it goes.
     const NOTE_MAX = 1000;
-    let pendingSession = null;      // a new session started on purpose: the id waiting for its first record
+    let chosenSession = null;       // a new session started on purpose: { id, at }. It stays the session until 30 minutes pass in it.
     let freshSession = null;        // the id for the next record when no session is going on
     const liveNewest = () => { const n = saved[0]; return n && n.sessionId && Date.now() - new Date(n.time).getTime() <= SESSION_GAP_MIN * 60000 ? n : null; };
     function currentSessionId() {
-        if (pendingSession && saved.some((r) => r.sessionId === pendingSession)) pendingSession = null;      // it has begun
-        if (pendingSession) return pendingSession;
+        if (chosenSession) {
+            // (also when its first measurement was deleted again: the session before it must not be taken up instead)
+            const last = saved.find((r) => r.sessionId === chosenSession.id);
+            const ref = last ? new Date(last.time).getTime() : chosenSession.at;
+            if (Date.now() - ref <= SESSION_GAP_MIN * 60000) return chosenSession.id;
+            chosenSession = null;
+        }
         const newest = liveNewest();
         if (newest) { freshSession = null; return newest.sessionId; }
         if (!freshSession || saved.some((r) => r.sessionId === freshSession)) freshSession = R.uuid();
         return freshSession;        // the same one until a record carries it
     }
-    const sessionIsNew = () => { const id = currentSessionId(); return id === pendingSession || id === freshSession; };
+    const sessionIsNew = () => { const id = currentSessionId(); return !saved.some((r) => r.sessionId === id); };
     function startNewSession() {
-        pendingSession = R.uuid();
+        chosenSession = { id: R.uuid(), at: Date.now() };
         lastPosition = null;
+        noteUndo(null);
+    }
+    // A description that was replaced rather than added to can be put back with one tap: the earlier
+    // measurements get their old text again, and the new text starts a session of its own.
+    let undo = null;
+    function noteUndo(u) {
+        undo = u;
+        const b = document.getElementById('noteUndo');
+        if (!b) return;
+        b.hidden = !u;
+        if (u) b.textContent = 'Undo: keep "' + (u.old.length > 40 ? u.old.slice(0, 38) + '…' : u.old) + '" on the ' + u.ids.size + ' earlier recording' + (u.ids.size === 1 ? '' : 's') + ' of this session, and start a new session for the new text';
+    }
+    function noteUndoTap() {
+        const u = undo;
+        if (!u) return;
+        noteUndo(null);
+        try {
+            const now = $('saveNote').value;
+            applySessionNote(u.key, u.ids, u.text, u.old);
+            $('saveNote').value = now; noteTyped();
+            startNewSession();
+            renderSaved(); refreshPlaces(); summaries();
+            saveNote('The earlier measurements have their description back. The next measurement starts a new session.');
+        } catch (e) { saveNote('That could not be undone here: change the description on the Saved tab.', true); }
     }
     // What is written under the chart describes the session being measured: a change there reaches the
     // measurements the session already has, so that one description, grown along the way, covers the whole set.
     function syncSessionNote(fill) {
         try {
-            if (sessionIsNew()) return;      // a new session: nothing to bring up to date
-            const newest = liveNewest();
-            const sess = newest && R.sessions(saved, SESSION_GAP_MIN).find((x) => x.records.includes(newest));
-            if (!sess) return;
+            const id = currentSessionId();
+            const sess = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.records.some((r) => r.sessionId === id));
+            if (!sess) return;      // a new session: nothing to bring up to date
             const text = $('saveNote').value.trim().slice(0, NOTE_MAX);
             // an emptied field does not wipe a description: that is done on the Saved tab, on purpose
             if (!text) { if (fill && sess.note) { $('saveNote').value = sess.note; noteTyped(); } return; }
             if (text === sess.note) return;
             const ids = new Set(sess.records.filter((r) => placeKey(r.sessionNote) === placeKey(sess.note) || !placeKey(r.sessionNote)).map((r) => r.id));
-            if (applySessionNote(sess.key, ids, sess.note, text)) { renderSaved(); refreshPlaces(); summaries(); }
+            const old = sess.note, grew = !old || text.toLowerCase().includes(old.toLowerCase());
+            if (applySessionNote(sess.key, ids, old, text)) {
+                noteUndo(grew ? null : { key: sess.key, ids, old, text });       // added to: nothing is lost. Replaced: it can be put back
+                renderSaved(); refreshPlaces(); summaries();
+            }
         } catch (e) { /* the description still goes with the measurements made from now on */ }
     }
     // A place keeps one identity under its name: the same name gives the same id, a new name a new id.
@@ -1584,7 +1620,7 @@
             b.addEventListener('click', () => { act(); box.open = false; });
             host.appendChild(b);
         };
-        const going = !!liveNewest() && !sessionIsNew();
+        const going = !sessionIsNew();
         if (going) chip('New session, same description', '', () => { startNewSession(); saveNote('The next measurement starts a new session.'); refreshPlaces(); });
         const now = placeKey($('saveNote').value);
         placeNames().filter((n) => placeKey(n) !== now).slice(0, 6).forEach((n) => chip(n.length > 38 ? n.slice(0, 36) + '…' : n, n, () => {
@@ -2393,7 +2429,21 @@
                 // a location search cut short by closing the app will never finish
                 if (r.locationStatus === 'pending') r.locationStatus = r.location ? 'ok' : 'unavailable';
                 // written as "without sound" while its sound was still on the way: if the sound did arrive, they belong together again
-                if (r.audioPending && sounds.has(r.id)) { r.audio = r.audioPending; r.audioMissing = false; delete r.audioPending; putRecord(r).catch(() => {}); }
+                if (r.audioPending && sounds.has(r.id)) {
+                    const whole = r.audioPending;
+                    r.audio = whole; r.audioMissing = false; delete r.audioPending;
+                    if (r.kind !== 'voice') putRecord(r).catch(() => {});
+                    // a voice note: the sound found may be the shorter safety copy written while it was being recorded
+                    else tx('audio', 'readonly', (t) => t.objectStore('audio').get(r.id)).then((x) => {
+                        const got = x && x.buffer ? x.buffer.byteLength : 0;
+                        if (got && whole.bytes && got !== whole.bytes) {
+                            r.interrupted = true;
+                            r.audio = Object.assign({}, whole, { bytes: got, durationS: Number(((whole.durationS || 0) * got / whole.bytes).toFixed(1)) });
+                            renderSaved();
+                        }
+                        return putRecord(r);
+                    }).catch(() => {});
+                }
             });
             saved = saved.concat(fromDisk).sort((a, b) => (a.time < b.time ? 1 : -1));
             if (loadFailed) { loadFailed = false; storageWarn = ''; savedMsg(''); tabMarks(); }
@@ -2628,6 +2678,7 @@
     setInterval(tabMarks, 400);
 
     try { const vb = document.getElementById('voiceBtn'); if (vb) { vb.addEventListener('click', voiceToggle); voiceButton(); } } catch (e) { /* an extra */ }
+    try { const ub = document.getElementById('noteUndo'); if (ub) ub.addEventListener('click', noteUndoTap); } catch (e) { /* an extra */ }
     // the phone-position extra is wired last of the optional things and can never stop the start-up
     try {
         motionLine();
