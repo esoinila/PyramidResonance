@@ -149,6 +149,11 @@
         .posGroup { border-top: 1px solid var(--gold); margin-top: 10px; padding-top: 8px; }
         .posTitle { color: var(--gold); margin: 0 0 4px; }
         .rec.inPos { border-top: 1px dashed var(--line); margin-left: 10px; }
+        #voiceBtn { min-height: 52px; }
+        #voiceBtn[aria-pressed="true"] { background: var(--bad); color: #000; border-color: var(--bad); }
+        .voiceNote { border-top: 1px solid var(--line); padding: 8px 0; }
+        .voiceNote audio { width: 100%; margin-top: 6px; }
+        textarea { width: 100%; font: inherit; font-size: 1rem; line-height: 1.35; color: #fff; background: #222; border: 1px solid var(--gold-dim); border-radius: 8px; padding: 10px; resize: vertical; min-height: 4.8em; }
         .session { border-top: 2px solid var(--gold); padding: 12px 0 4px; margin-top: 10px; }
         .session:first-child { margin-top: 0; }
         .sessTitle { font-size: 1.05rem; color: var(--gold); font-variant-numeric: tabular-nums; }
@@ -211,6 +216,7 @@
             <div id="meter"><div id="meterBar"></div></div>
             <div id="meterText">Microphone off</div>
             <div id="tagBar" class="tagBar"></div>
+            <div class="row"><button id="voiceBtn" class="ghost" type="button" aria-pressed="false">● Record a voice note for this session</button></div>
             <p class="hint" id="motionLine2" role="status"></p>
             <div class="row"><button id="motionAsk2" class="ghost" type="button" style="visibility:hidden" disabled>Also note the phone's position</button></div>
             <p class="warn" id="micWarn"></p>
@@ -228,10 +234,14 @@
                     <div id="recentList"></div>
                 </div>
                 <div class="row mt"><button id="openSaved" class="ghost" type="button">Open saved measurements</button></div>
-                <label class="mt">Session note: place or subject (optional; goes with every measurement until you change it)
-                    <input type="text" id="saveNote" maxlength="120" autocomplete="off" placeholder="e.g. stairwell, 2nd floor" list="placeList">
-                    <datalist id="placeList"></datalist>
+                <label class="mt">Describe this session (optional): place, where the phone was, what changed between measurements. Type or dictate. It belongs to the whole session, so you can add to it as you go.
+                    <textarea id="saveNote" maxlength="1000" rows="3" autocomplete="off" placeholder="e.g. bike cellar; first four in the left window corner on the floor, last three in the right one"></textarea>
                 </label>
+                <button id="noteUndo" class="ghost mt" type="button" hidden></button>
+                <details id="placeBox" class="mt" hidden>
+                    <summary id="placeSummary">Use an earlier description</summary>
+                    <div id="placeChips" class="tagRow"></div>
+                </details>
             </div>
         </div>
 

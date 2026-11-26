@@ -473,3 +473,21 @@ test('a record carries its picked spot and direction and its position, and files
   assert.strictEqual(R.fileBase(R.makeRecord({ time: new Date('2026-11-25T16:30:41Z'), tzOffsetMin: 120, kind: 'clap', note: 'only a note' })), '2026-11-25_183041_clap_only-a-note');
   assert.strictEqual(R.exportAll([rec], 't').measurements[0].spot, 'Window sill');
 });
+
+test('voice notes, sound file endings, and long descriptions kept out of file names', () => {
+  const R = require('../records.js');
+  const at = (iso, extra) => R.makeRecord(Object.assign({ time: new Date(iso), tzOffsetMin: 120 }, extra || {}));
+  const note = at('2026-11-26T10:36:00Z', { kind: 'voice' });
+  assert.strictEqual(note.kind, 'voice');
+  assert.strictEqual(R.fileBase(note), '2026-11-26_123600_voice');
+  assert.strictEqual(R.makeRecord({ kind: 'banana' }).kind, 'clap');
+  assert.deepStrictEqual(['audio/wav', 'audio/mp4', 'audio/mp4;codecs=mp4a.40.2', 'audio/webm;codecs=opus', 'audio/ogg', '', 'audio/x-thing'].map(R.soundExt), ['.wav', '.m4a', '.m4a', '.webm', '.ogg', '.audio', '.audio']);
+  // a session's zip is named by its measurements, not counting voice notes; a long description is not a name
+  const long = 'Last three were in the other window corner floor mic towards room center. The ones before were in the previous corner.';
+  const s = R.sessions([at('2026-11-26T10:34:22Z', { kind: 'clap', sessionNote: long }), at('2026-11-26T10:34:33Z', { kind: 'clap', sessionNote: long }), at('2026-11-26T10:36:00Z', { kind: 'voice', sessionNote: long })]);
+  assert.strictEqual(s.length, 1);
+  assert.strictEqual(s[0].fileBase, '2026-11-26_1234_2-measurements');
+  assert.strictEqual(s[0].records.length, 3, 'the voice note belongs to the session');
+  assert.strictEqual(R.sessions([at('2026-11-26T10:34:22Z', { sessionNote: 'Bike cellar' })])[0].fileBase, '2026-11-26_1234_bike-cellar_1-measurement');
+  assert.strictEqual(R.makeRecord({ sessionNote: 'x'.repeat(1500) }).sessionNote.length, 1000, 'a description may be long');
+});

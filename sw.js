@@ -2,8 +2,8 @@
 // and is then served only from that cache: the app opens at once with no signal and
 // can never be a mix of two versions. To release a change, change VERSION here and
 // BUILD in app.js (and RELEASED in both) with "node scripts/release.js <version>": a changed sw.js is what makes a phone fetch the new set.
-const VERSION = '2.7.0';
-const RELEASED = '2026-11-25T17:55:00Z';   // when this version was published; the same value is in app.js
+const VERSION = '2.8.0';
+const RELEASED = '2026-11-26T12:01:00Z';   // when this version was published; the same value is in app.js
 const CACHE_NAME = 'pyramid-res-' + VERSION;
 const ASSETS = ['./', './index.html', './app.js', './modes.js', './records.js', './manifest.json', './icon.svg',
     './icon-180.png', './icon-192.png', './icon-512.png'];
