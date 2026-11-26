@@ -69,9 +69,9 @@
       id: String(input.id || iso.replace(/\D/g, '').slice(0, 17) + '-' + Math.random().toString(36).slice(2, 6)),
       time: iso,
       tzOffsetMin: num(input.tzOffsetMin) == null ? -time.getTimezoneOffset() : input.tzOffsetMin,
-      kind: input.kind === 'sweep' ? 'sweep' : 'clap',
+      kind: input.kind === 'sweep' ? 'sweep' : input.kind === 'voice' ? 'voice' : 'clap',     // 'voice': a spoken note for the session, not a measurement
       note: String(input.note || '').trim().slice(0, 200),                 // about this one measurement
-      sessionNote: String(input.sessionNote || '').trim().slice(0, 200),   // the place or subject of the whole session
+      sessionNote: String(input.sessionNote || '').trim().slice(0, 1000),  // the place or subject of the whole session, or a longer description of it
       // picked from a short set of values instead of typed each time:
       spot: String(input.spot || '').trim().slice(0, 60),                 // where in the place the phone was ("saddle", "window sill")
       direction: String(input.direction || '').trim().slice(0, 60),       // which way it pointed or lay
@@ -119,7 +119,7 @@
   // shows only the first twenty-odd characters: "2026-11-23_120106_clap".
   function fileBase(rec) {
     const p = localParts(rec), slug = slugOf(rec.spot || rec.note, 16);     // short: a long name pushes the time out of sight
-    return p.date + '_' + p.compact + '_' + (rec.kind === 'sweep' ? 'sweep' : 'clap') + (slug ? '_' + slug : '');
+    return p.date + '_' + p.compact + '_' + (rec.kind === 'sweep' ? 'sweep' : rec.kind === 'voice' ? 'voice' : 'clap') + (slug ? '_' + slug : '');
   }
 
   // ---------- the phone's position, from its motion sensor ----------
@@ -218,12 +218,24 @@
       s.note = Object.keys(count).sort((a, b) => count[b] - count[a] || (a < b ? -1 : 1))[0] || '';
       s.key = s.id || first.id;
       s.start = localParts(first); s.end = localParts(end);
-      const slug = slugOf(s.note, 24);
+      // a short note is a name and goes into the file name; a long one is a description and does not
+      const slug = s.note.length <= 32 ? slugOf(s.note, 24) : '';
+      const measured = s.records.filter((x) => x.kind !== 'voice').length;
       // "2026-11-23_1200_bike-cellar_14-measurements"
-      s.fileBase = s.start.date + '_' + s.start.compact.slice(0, 4) + (slug ? '_' + slug : '') + '_' + s.records.length + '-measurement' + (s.records.length === 1 ? '' : 's');
+      s.fileBase = s.start.date + '_' + s.start.compact.slice(0, 4) + (slug ? '_' + slug : '') + '_' + measured + '-measurement' + (measured === 1 ? '' : 's');
       s.records.reverse();
     });
     return out.reverse();
+  }
+
+  // File ending for a recorded sound, by its type (a clap is WAV; a voice note is whatever the phone's recorder makes)
+  function soundExt(type) {
+    const t = String(type || '').toLowerCase();
+    if (t.indexOf('wav') >= 0) return '.wav';
+    if (t.indexOf('mp4') >= 0 || t.indexOf('aac') >= 0 || t.indexOf('m4a') >= 0) return '.m4a';
+    if (t.indexOf('webm') >= 0) return '.webm';
+    if (t.indexOf('ogg') >= 0) return '.ogg';
+    return '.audio';
   }
 
   // ---------- one zip file out of many files ----------
@@ -363,5 +375,5 @@
     return { type: 'audio/wav', format: 'float32', sampleRate: rate, channels: 1, samples: sampleCount, durationS: round(sampleCount / rate, 3) };
   }
 
-  return { SCHEMA, encodeWav, audioInfo, cleanLocation, betterFix, makeRecord, localParts, fileBase, formatLocation, mapsUrl, peakSummary, shareText, exportAll, fitSize, sessions, zipStore, crc32, uuid, isUuid, angleDeg, poseName, movedSince, cleanMotion };
+  return { SCHEMA, encodeWav, audioInfo, cleanLocation, betterFix, makeRecord, localParts, fileBase, formatLocation, mapsUrl, peakSummary, shareText, exportAll, fitSize, sessions, zipStore, crc32, uuid, isUuid, angleDeg, poseName, movedSince, cleanMotion, soundExt };
 });

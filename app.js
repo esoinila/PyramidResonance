@@ -274,6 +274,7 @@
 
     function setButtons() {
         try { motionLine(); } catch (e) { /* the phone-position extra is not ready yet, or missing */ }
+        try { voiceButton(); } catch (e) { /* not ready yet */ }
         const sweeping = !!(voice && voice.kind === 'sweep');
         $('stop').disabled = !voice;
         $('sweep').textContent = sweeping ? 'Stop sweep' : 'Start sweep';
@@ -373,6 +374,7 @@
             if (clapBusy) return;
             abortSweep();
             keepPartialSweep();      // never start over the top of an unsaved one
+            try { voiceStop(); } catch (e) { /* an extra */ }
             recording = micOn;
             try { if (selected.size) { selected.clear(); syncBoxes(); } } catch (e) { /* an extra */ }
             if (recording) { try { motionBegin(1000); } catch (e) { /* an extra */ } }
@@ -509,6 +511,81 @@
         let at = 0;
         chunks.forEach((c) => { samples.set(c, at); at += c.length; });
         return { samples, sampleRate: ctx.sampleRate };
+    }
+
+    // ---------- Voice notes ----------
+    // A spoken note for the session: easier in the field than typing. It is recorded with the phone's own recorder
+    // (small files), saved like a measurement (so it is never dropped: memory first, storage right after, retried),
+    // listed with its session and sent in the session's zip.
+    const voice1 = { rec: null, chunks: [], t0: 0, timer: null, mime: '' };
+    const VOICE_MAX_S = 300;
+    const voiceOk = () => typeof MediaRecorder !== 'undefined';
+    function voiceButton() {
+        const b = document.getElementById('voiceBtn');
+        if (!b) return;
+        if (!voiceOk()) { b.disabled = true; b.textContent = 'Voice notes are not possible on this phone'; return; }
+        if (voice1.rec) {
+            const s = Math.floor((Date.now() - voice1.t0) / 1000);
+            b.textContent = '■ Stop the voice note · ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+        } else b.textContent = '● Record a voice note for this session';
+        b.setAttribute('aria-pressed', voice1.rec ? 'true' : 'false');
+        b.disabled = !voice1.rec && (clapBusy || recording || micBusy);
+    }
+    async function voiceToggle() {
+        if (voice1.rec) { voiceStop(); return; }
+        if (!voiceOk() || clapBusy || recording) return;
+        $('micWarn').textContent = '';
+        if (!micOn && !micBusy) { await toggleMic(); }
+        if (!micOn || !micStream) return;       // refused or failed: the reason is on the page
+        try {
+            const r = new MediaRecorder(micStream);
+            voice1.chunks = []; voice1.t0 = Date.now(); voice1.mime = r.mimeType || '';
+            r.addEventListener('dataavailable', (e) => { if (e.data && e.data.size) voice1.chunks.push(e.data); });
+            r.addEventListener('stop', () => voiceFinish(r));
+            r.addEventListener('error', () => voiceFinish(r));
+            r.start(1000);          // a piece every second, so that an abrupt end still leaves what was said
+            voice1.rec = r;
+            voice1.timer = setInterval(() => { voiceButton(); if (Date.now() - voice1.t0 > VOICE_MAX_S * 1000) voiceStop(); }, 500);
+        } catch (e) {
+            voice1.rec = null;
+            $('micWarn').textContent = 'The voice note could not start: ' + (e && e.message ? e.message : 'recorder error') + '.';
+        }
+        voiceButton();
+    }
+    function voiceStop() {
+        const r = voice1.rec;
+        if (!r) return;
+        try { if (r.state !== 'inactive') r.stop(); else voiceFinish(r); } catch (e) { voiceFinish(r); }
+    }
+    async function voiceFinish(r) {
+        if (voice1.rec !== r) return;
+        voice1.rec = null;
+        clearInterval(voice1.timer); voice1.timer = null;
+        const chunks = voice1.chunks, started = voice1.t0, secs = (Date.now() - started) / 1000;
+        voice1.chunks = [];
+        voiceButton();
+        if (!chunks.length) { saveNote('The voice note recorded nothing, so there was nothing to save.', true); return; }
+        let buffer = null, type = '';
+        try {
+            const blob = new Blob(chunks, { type: voice1.mime || chunks[0].type || 'audio/mp4' });
+            type = (blob.type || 'audio/mp4').split(';')[0];
+            buffer = await blob.arrayBuffer();
+        } catch (e) { saveNote('The voice note could not be put together (' + (e && e.message ? e.message : 'error') + ').', true); return; }
+        const rec = R.makeRecord({ time: new Date(started), kind: 'voice', sessionNote: $('saveNote').value, sessionId: currentSessionId(), placeId: placeIdFor($('saveNote').value),
+            curve: [], peaks: [], app: BUILD, locationStatus: 'unavailable' });
+        rec.audio = { type, format: 'recorder', durationS: Number(secs.toFixed(1)), bytes: buffer.byteLength };
+        saved.unshift(rec);
+        saved.sort((a, b) => (a.time < b.time ? 1 : -1));
+        unstored.add(rec);
+        memAudio.set(rec.id, buffer);
+        forgetPrepared(rec);
+        renderSaved();
+        const ok = await storeRecord(rec);
+        renderSaved();
+        tabMarks();
+        const len = Math.floor(secs / 60) + ':' + String(Math.round(secs) % 60).padStart(2, '0');
+        saveNote(ok ? 'Voice note saved (' + len + '). It is with this session on the Saved tab and goes into the session\'s zip.'
+            : 'The voice note (' + len + ') is NOT STORED on the phone (' + storeError + '). It is held only while the app stays open: send the session now. The app keeps trying to store it.', !ok);
     }
 
     // ---------- Motion sensor ----------
@@ -703,6 +780,7 @@
         cancelClap();
         stopTap();
         keepPartialSweep();
+        try { voiceStop(); } catch (e) { /* an extra */ }       // what was said so far is saved
         recording = false;
         if (micSource) { try { micSource.disconnect(); } catch (e) { /* ignore */ } }
         if (micStream) micStream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
@@ -770,6 +848,7 @@
 
     async function recordClap() {
         if (!micOn || clapBusy || micBusy) return;
+        try { voiceStop(); } catch (e) { /* an extra */ }
         // ticks end with the tap that starts a measurement, not some seconds later when the recording begins
         try { if (selected.size) { selected.clear(); syncBoxes(); } } catch (e) { /* an extra */ }
         if (!(settings.fMax > settings.fMin)) {
@@ -1127,7 +1206,7 @@
         const wav = memAudio.get(rec.id) || null;
         let ok = false;
         try {
-            if (wav) await dbWrite(['records', 'audio'], (t) => { t.objectStore('audio').put({ type: 'audio/wav', buffer: wav }, rec.id); return t.objectStore('records').put(rec); });
+            if (wav) await dbWrite(['records', 'audio'], (t) => { t.objectStore('audio').put({ type: (rec.audio && rec.audio.type) || 'audio/wav', buffer: wav }, rec.id); return t.objectStore('records').put(rec); });
             else await dbWrite('records', (t) => t.objectStore('records').put(rec));
             unstored.delete(rec);
             memAudio.delete(rec.id);
@@ -1170,6 +1249,8 @@
 
     const whenShort = (iso) => { const t = new Date(iso), p = (n) => String(n).padStart(2, '0'); return t.getDate() + '.' + (t.getMonth() + 1) + '. ' + p(t.getHours()) + ':' + p(t.getMinutes()); };
     // Everything a person should know about a record at a glance: [text, kind], kind 'bad' is shown in red
+    const isVoice = (rec) => rec.kind === 'voice';
+    const measured = (list) => list.filter((r) => !isVoice(r));
     function flags(rec) {
         const out = [];
         if (unstored.has(rec)) out.push(['NOT STORED ON THE PHONE: send it now', 'bad']);
@@ -1181,7 +1262,7 @@
             if (rec.motion.movedSincePrevious === true) out.push(['phone moved', 'todo']);
             else if (rec.motion.movedSincePrevious === false) out.push(['same position', 'ok']);
         }
-        if (!rec.location && rec.locationStatus !== 'pending') out.push(['no location', 'todo']);
+        if (!isVoice(rec) && !rec.location && rec.locationStatus !== 'pending') out.push(['no location', 'todo']);
         out.push(rec.sentAt ? ['sent ' + whenShort(rec.sentAt), 'ok'] : ['not sent yet', 'todo']);
         return out;
     }
@@ -1198,10 +1279,12 @@
     }
     const noteTimers = new Map();   // record id -> timer of a note waiting to be written
     function summaries() {
+        const m = measured(saved), notes = saved.length - m.length;
         const unsent = saved.filter((r) => !r.sentAt).length;
-        $('savedCount').textContent = saved.length ? ' ' + saved.length : '';
-        $('savedSummary').textContent = saved.length ? saved.length + (saved.length === 1 ? ' measurement' : ' measurements') + ' on this phone, ' + (unsent ? unsent + ' not sent yet.' : 'all sent.') : '';
-        $('recentTitle').textContent = saved.length + ' saved on this phone' + (unsent ? ', ' + unsent + ' not sent yet' : ', all sent') + '. Newest first; the session being measured is listed whole:';
+        const voiceText = notes ? ' and ' + notes + (notes === 1 ? ' voice note' : ' voice notes') : '';
+        $('savedCount').textContent = m.length ? ' ' + m.length : '';
+        $('savedSummary').textContent = saved.length ? m.length + (m.length === 1 ? ' measurement' : ' measurements') + voiceText + ' on this phone, ' + (unsent ? unsent + ' not sent yet.' : 'all sent.') : '';
+        $('recentTitle').textContent = m.length + ' saved on this phone' + (unsent ? ', ' + unsent + ' not sent yet' : ', all sent') + '. Newest first; the session being measured is listed whole:';
     }
     // ---------- spot and direction: picked, not typed ----------
     // Two things are said about a measurement by tapping a value from a short set: the spot in the place where the
@@ -1518,12 +1601,12 @@
             $('savedEmpty').hidden = saved.length > 0;
             summaries();
             // the newest few are also listed right under the chart, so each new measurement is seen to arrive
-            $('recentBox').hidden = saved.length === 0;
+            $('recentBox').hidden = measured(saved).length === 0;
             const recentAt = $('recentList').scrollTop;
             $('recentList').textContent = '';
             // while a session is being measured, all of it is listed (it is what gets tagged); otherwise the newest five
             const liveId = saved[0] && saved[0].sessionId && Date.now() - new Date(saved[0].time).getTime() <= SESSION_GAP_MIN * 60000 ? saved[0].sessionId : null;
-            const recent = liveId ? saved.filter((r) => r.sessionId === liveId).slice(0, 60) : saved.slice(0, 5);
+            const recent = measured(liveId ? saved.filter((r) => r.sessionId === liveId).slice(0, 60) : saved.slice(0, 5));
             recent.forEach((rec) => {
                 const row = document.createElement('div');
                 row.className = 'recentRow';
@@ -1552,20 +1635,21 @@
                 card.dataset.key = sess.key;
                 const info = el('p', null, 'hint sessInfo');
                 const describe = () => {
-                    const n = sess.records.length, sounds = sess.records.filter((r) => r.audio).length, unsent = sess.records.filter((r) => !r.sentAt).length;
+                    const rows = measured(sess.records), notes = sess.records.length - rows.length;
+                    const n = rows.length, sounds = rows.filter((r) => r.audio).length, unsent = sess.records.filter((r) => !r.sentAt).length;
                     const bad = {};
                     sess.records.forEach((r) => flags(r).forEach((f) => { if (f[1] === 'bad') bad[f[0]] = (bad[f[0]] || 0) + 1; }));
-                    info.textContent = n + (n === 1 ? ' measurement' : ' measurements') + (sounds ? ', ' + sounds + ' with sound' : '') + ' · ' + (unsent ? unsent + ' not sent yet' : 'all sent');
+                    info.textContent = n + (n === 1 ? ' measurement' : ' measurements') + (sounds ? ', ' + sounds + ' with sound' : '') + (notes ? ' · ' + notes + (notes === 1 ? ' voice note' : ' voice notes') : '') + ' · ' + (unsent ? unsent + ' not sent yet' : 'all sent');
                     Object.keys(bad).forEach((k) => { const w = el('span', ' · ' + bad[k] + ' × ' + k, 'flag-bad'); info.appendChild(w); });
                 };
                 card.appendChild(el('b', dateFi(sess.start) + ' ' + sess.start.time + (sess.end.time !== sess.start.time ? '–' + sess.end.time : ''), 'sessTitle'));
                 describe();
                 card.appendChild(info);
                 // one note for the whole session; it does not replace a different note that single measurements already carry
-                const sNote = document.createElement('input');
-                sNote.type = 'text'; sNote.className = 'sessNote'; sNote.maxLength = 200; sNote.autocomplete = 'off';
-                sNote.placeholder = 'Place or note for this whole session'; sNote.value = sess.note; sNote.dataset.id = sess.key;
-                sNote.setAttribute('list', 'placeList');
+                // a box of several lines: a set of measurements is best described once, in a few sentences, typed or dictated
+                const sNote = document.createElement('textarea');
+                sNote.className = 'sessNote'; sNote.maxLength = 1000; sNote.rows = 3; sNote.autocomplete = 'off';
+                sNote.placeholder = 'Describe this session: place, where the phone was, what changed between the measurements. Type or dictate.'; sNote.value = sess.note; sNote.dataset.id = sess.key;
                 sNote.setAttribute('aria-label', 'Note for the session of ' + dateFi(sess.start) + ' ' + sess.start.time);
                 sNote.dataset.was = sess.note;
                 sNote.dataset.ids = sess.records.filter((r) => placeKey(r.sessionNote) === placeKey(sess.note) || !placeKey(r.sessionNote)).map((r) => r.id).join(' ');
@@ -1617,17 +1701,47 @@
                 sRow.appendChild(sendB);
                 const pickAll = el('button', 'Select all', 'ghost');
                 pickAll.type = 'button'; pickAll.dataset.role = 'pickSession';
-                pickAll.addEventListener('click', () => pickMany(sess.records));
+                pickAll.addEventListener('click', () => pickMany(measured(sess.records)));
                 sRow.appendChild(pickAll);
                 card.appendChild(sRow);
+                // spoken notes of the session: listened to here, sent in the session's zip
+                sess.records.filter(isVoice).forEach((rec) => {
+                    const p = R.localParts(rec), secs = Math.round((rec.audio && rec.audio.durationS) || 0);
+                    const box = el('div', null, 'voiceNote');
+                    box.dataset.id = rec.id;
+                    const head = el('p', null, 'recHead');
+                    head.appendChild(el('b', 'Voice note ' + p.time + ':' + p.compact.slice(4)));
+                    head.appendChild(document.createTextNode(' · ' + Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0') + (rec.audio ? '' : ' · THE SOUND IS MISSING')));
+                    box.appendChild(head);
+                    box.appendChild(flagLine(rec));
+                    const row = el('div', null, 'row');
+                    const play = el('button', 'Play', 'ghost'); play.type = 'button'; play.dataset.role = 'playVoice';
+                    play.addEventListener('click', async () => {
+                        const buf = await blobOf('audio', rec);
+                        if (!buf) { savedMsg('The sound of this voice note could not be found in storage.'); return; }
+                        const old = box.querySelector('audio');
+                        if (old) { try { URL.revokeObjectURL(old.src); } catch (e) { /* ignore */ } old.remove(); }
+                        const a = document.createElement('audio');
+                        a.controls = true; a.src = URL.createObjectURL(new Blob([buf], { type: (rec.audio && rec.audio.type) || 'audio/mp4' }));
+                        box.appendChild(a);
+                        a.play().catch(() => {});
+                    });
+                    row.appendChild(play);
+                    const del = el('button', 'Delete', 'ghost'); del.type = 'button'; del.dataset.role = 'delete';
+                    del.addEventListener('click', () => deleteRecord(rec, del));
+                    row.appendChild(del);
+                    box.appendChild(row);
+                    card.appendChild(box);
+                });
                 const list = el('div', null, 'recs');
+                const rowsOfSession = measured(sess.records);
                 // positions in the order they were measured in: Position 1 is the first of the session
                 const positions = [];
-                sess.records.slice().reverse().forEach((r) => { if (r.positionId && !positions.includes(r.positionId)) positions.push(r.positionId); });
-                sess.records.forEach((rec, index) => {
+                rowsOfSession.slice().reverse().forEach((r) => { if (r.positionId && !positions.includes(r.positionId)) positions.push(r.positionId); });
+                rowsOfSession.forEach((rec, index) => {
                     const pos = rec.positionId || null;
-                    const group = pos ? sess.records.filter((r) => r.positionId === pos) : null;
-                    if (pos && (index === 0 || sess.records[index - 1].positionId !== pos)) {
+                    const group = pos ? rowsOfSession.filter((r) => r.positionId === pos) : null;
+                    if (pos && (index === 0 || rowsOfSession[index - 1].positionId !== pos)) {
                         const head = el('div', null, 'posGroup');
                         head.dataset.id = pos;
                         const newest = group[0];
@@ -2035,7 +2149,7 @@
         }
         if (rec.audio) {
             const a = await blobOf('audio', rec);
-            if (a) files.push(new File([a], base + '.wav', { type: 'audio/wav' })); else missing.push('the sound');
+            if (a) files.push(new File([a], base + R.soundExt(rec.audio.type), { type: rec.audio.type || 'audio/wav' })); else missing.push('the sound');
         }
         return { files, title: 'Resonance measurement', text: R.shareText(rec), missing, recs: missing.length ? [] : [rec] };
     }
@@ -2055,7 +2169,7 @@
             let complete = true;
             if (rec.audio) {
                 const a = await blobOf('audio', rec);
-                if (a) { parts.push({ name: b + '.wav', type: 'audio/wav', bytes: new Uint8Array(a), time: when }); sounds++; }
+                if (a) { parts.push({ name: b + R.soundExt(rec.audio.type), type: rec.audio.type || 'audio/wav', bytes: new Uint8Array(a), time: when }); sounds++; }
                 else { complete = false; missing.push('the sound of ' + recTitle(rec)); }
             }
             if (rec.photo) {
@@ -2396,7 +2510,7 @@
     $('saveNote').addEventListener('change', noteTyped);
     const again = () => { if (loadFailed) loadSaved().then(retryUnstored); else retryUnstored(); };
     setInterval(again, 15000);
-    document.addEventListener('visibilitychange', () => { if (document.hidden) commitSessionNotes(); else { again(); try { expireTags(); if (!clapBusy) setClapButton(); } catch (e) { /* an extra */ } } });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) { commitSessionNotes(); try { voiceStop(); } catch (e) { /* an extra */ } } else { again(); try { expireTags(); if (!clapBusy) setClapButton(); } catch (e) { /* an extra */ } } });
     window.addEventListener('pagehide', () => { commitSessionNotes(); });
     $('openSaved').addEventListener('click', () => showTab('saved', true));
     $('photoInput').addEventListener('change', photoChosen);
@@ -2424,6 +2538,7 @@
     showTab(settings.tab);
     setInterval(tabMarks, 400);
 
+    try { const vb = document.getElementById('voiceBtn'); if (vb) { vb.addEventListener('click', voiceToggle); voiceButton(); } } catch (e) { /* an extra */ }
     // the phone-position extra is wired last of the optional things and can never stop the start-up
     try {
         motionLine();
@@ -2441,7 +2556,7 @@
     if (updater) updater.busy = () => {
         const a = document.activeElement;
         const typing = !!a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && (a.type === 'text' || a.type === 'number')));
-        return !!(voice || micOn || clapBusy || recording || curveState === 'done' || unstored.size || pendingWrites || locating || photoBusy || noteTimers.size || typing || uncommittedNotes());
+        return !!(voice || micOn || clapBusy || recording || curveState === 'done' || unstored.size || pendingWrites || locating || photoBusy || noteTimers.size || typing || uncommittedNotes() || voice1.rec);
     };
     syncInputs();
     if (!recompute()) {

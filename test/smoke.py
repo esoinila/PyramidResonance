@@ -447,8 +447,7 @@ async def main():
         check(len(ids) == 2 and all(uu.match(i[0]) and uu.match(i[1]) for i in ids) and ids[0][0] != ids[1][0] and ids[0][1] == ids[1][1], 'each measurement has its own identifier and both share the session identifier', ids)
         # one note for the whole session; earlier places are offered as suggestions
         await page.fill('#savedList .sessNote', 'Test room'); await page.dispatch_event('#savedList .sessNote', 'change'); await page.wait_for_timeout(700)
-        check(await page.evaluate("saveNote.value") == 'Test room' and await page.evaluate("[...placeList.options].map(o => o.value).join()") == 'Test room'
-              and await page.evaluate("saveNote.getAttribute('list')") == 'placeList', 'the session note is typed once for all its measurements, continues for the next ones, and is offered as a known place')
+        check(await page.evaluate("saveNote.value") == 'Test room' and await page.evaluate("[...placeList.options].map(o => o.value).join()") == 'Test room', 'the session note is typed once for all its measurements and continues for the next ones')
         ids = await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll();
             g.onsuccess = () => { q.result.close(); done(g.result.map(r => [r.sessionNote, r.placeId, r.note])); }; }; })""")
         check(len(ids) == 2 and all(i[0] == 'Test room' and uu.match(i[1] or '') for i in ids) and ids[0][1] == ids[1][1] and sorted(i[2] for i in ids) == ['', 'Test room, niche 3'],
@@ -769,11 +768,12 @@ async def main():
         check(await page.evaluate("document.activeElement.classList.contains('sessNote') && document.activeElement.value") == 'Beta' and (await page.evaluate(read))['eeee'][0] == 'Alpha',
               'a session note being typed survives the list being rebuilt, and is not written half way', await page.evaluate("document.activeElement.className + ' ' + document.activeElement.value"))
         await page.keyboard.type('max', delay=40)
-        await page.keyboard.press('Enter'); await page.wait_for_timeout(500)
-        await page.keyboard.type('2', delay=40)
+        await page.keyboard.press('Tab'); await page.wait_for_timeout(500)                 # leaving the box applies it ...
+        await page.click('#savedList .session:first-child .sessNote'); await page.keyboard.press('Control+End')
+        await page.keyboard.type('2', delay=40)                                              # ... and coming back to add to it works
         await page.keyboard.press('Tab'); await page.wait_for_timeout(900)
         after = await page.evaluate(read)
-        check(after['eeee'][0] == 'Betamax2' and after['ffff'][0] == 'Betamax2' and after['gggg'] == before['gggg'], 'a session note changes only the measurements that had the old note, and typing on after Enter is kept', after)
+        check(after['eeee'][0] == 'Betamax2' and after['ffff'][0] == 'Betamax2' and after['gggg'] == before['gggg'], 'a session note changes only the measurements that had the old note, and what is added on a second visit to the box is kept', after)
         check(after['eeee'][1] == before['eeee'][1] and after['eeee'][1] == after['ffff'][1] and after['eeee'][1] != after['gggg'][1], 'a place that is renamed keeps its identifier', after)
         # focusing a session note and leaving it unchanged changes nothing (the measurement here was just sent)
         sentmark = await page.evaluate("document.querySelector('#savedList .session:last-child .sessInfo').textContent")
@@ -1047,6 +1047,44 @@ async def main():
         import zipfile as zf2, io as io2
         names = zf2.ZipFile(io2.BytesIO(base64.b64decode(sent[-1]['files'][0]['b64']))).namelist() if sent and sent[-1]['files'][0].get('b64') else []
         check(sum(1 for n in names if n.endswith('_clap_saddle.wav')) == 2 and sum(1 for n in names if n.endswith('_clap_window-sill.wav')) == 2, 'the sound files are named after their spot', names)
+        # ---- a voice note for the session: spoken instead of typed
+        allrecs = "(() => { const q = indexedDB.open('pyramid-res'); return new Promise((done) => { q.onsuccess = () => { const t = q.result.transaction(['records', 'audio']); const g = t.objectStore('records').getAll(), k = t.objectStore('audio').getAllKeys(); t.oncomplete = () => { q.result.close(); done(g.result.filter(r => r.kind === 'voice').map(r => [r.audio && r.audio.type, r.audio && r.audio.bytes, r.audio && r.audio.durationS, k.result.includes(r.id), r.sessionId === g.result.find(x => x.kind === 'clap').sessionId])); }; }; }); })()"
+        await page.click('#voiceBtn'); await page.wait_for_timeout(2300)
+        check('Stop the voice note' in await page.evaluate("voiceBtn.textContent") and await page.evaluate("voiceBtn.getAttribute('aria-pressed')") == 'true' and await page.evaluate("PyramidUpdate.busy()") is True, 'a voice note is being recorded, and the button shows the time')
+        await page.click('#voiceBtn')
+        await page.wait_for_function("document.querySelectorAll('#savedList .voiceNote').length === 1", timeout=6000); await page.wait_for_timeout(500)
+        v = await page.evaluate(allrecs)
+        check(len(v) == 1 and (v[0][0] or '').startswith('audio/') and v[0][1] > 800 and 1.5 < v[0][2] < 4 and v[0][3] and v[0][4], 'the voice note is stored with its sound, in the session being measured', v)
+        check('1 voice note' in await page.evaluate("document.querySelector('.sessInfo').textContent") and '4 measurements' in await page.evaluate("document.querySelector('.sessInfo').textContent")
+              and await page.evaluate("savedCount.textContent.trim()") == '4' and await page.evaluate("document.querySelectorAll('#recentList .recentRow').length") == 4
+              and 'Voice note saved' in await page.evaluate("saveMsg.textContent"), 'it is listed with its session and is not counted as a measurement', await page.evaluate("document.querySelector('.sessInfo').textContent"))
+        await page.click('#savedList .voiceNote [data-role=playVoice]'); await page.wait_for_timeout(500)
+        check(await page.evaluate("!!document.querySelector('#savedList .voiceNote audio') && document.querySelector('#savedList .voiceNote audio').src.startsWith('blob:')"), 'it can be listened to on the Saved tab')
+        await page.click('[data-role=shareSession]'); await page.wait_for_timeout(1200)
+        sent = await page.evaluate("window.__shares")
+        zf = sent[-1]['files'][0]
+        names = zf2.ZipFile(io2.BytesIO(base64.b64decode(zf['b64']))).namelist() if zf.get('b64') else []
+        check(zf['name'].endswith('_4-measurements.zip') and sum(1 for n in names if re.search(r'_voice\.(webm|m4a|ogg)$', n)) == 1 and len(names) == 6, 'the voice note travels in the session zip, which is still named by its four measurements', [zf['name']] + names)
+        # leaving the app in the middle of a voice note saves what was said
+        await page.click('#voiceBtn'); await page.wait_for_timeout(1600)
+        await page.evaluate("(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange')); })()")
+        await page.wait_for_function("document.querySelectorAll('#savedList .voiceNote').length === 2", timeout=6000)
+        await page.evaluate("(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')); })()")
+        check(True, 'a voice note cut short by leaving the app is saved')
+        # starting a clap in the middle of a voice note saves the note and makes the clap
+        await page.click('#voiceBtn'); await page.wait_for_timeout(1300)
+        await page.click('#clap')
+        await page.wait_for_function("document.querySelectorAll('#savedList .voiceNote').length === 3", timeout=6000)
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        check(await page.evaluate("document.querySelectorAll('#recentList .recentRow').length") == 5, 'a clap started during a voice note ends and saves the note, then records as usual')
+        await page.click('#savedList .voiceNote [data-role=delete]'); await page.click('#savedList .voiceNote [data-role=delete]')
+        await page.wait_for_function("document.querySelectorAll('#savedList .voiceNote').length === 2", timeout=6000)
+        check(len(await page.evaluate(allrecs)) == 2, 'a voice note is deleted with two taps, like a measurement')
+        check(await page.evaluate("saveNote.tagName") == 'TEXTAREA' and await page.evaluate("document.querySelector('#savedList .sessNote').tagName") == 'TEXTAREA', 'the session description is a box of several lines, under the chart and on the Saved tab')
         await page.evaluate("clearInterval(window.__sensor)")
         await page.reload(); await page.wait_for_timeout(700)
         check(await page.evaluate("document.querySelector('#tagBar .tagRow[data-attr=spot] .chip[aria-pressed=true]').textContent") == 'window sill' and await page.evaluate("!startGate.hidden"), 'the picked spot is remembered over a restart (and the phone is asked again, as an iPhone does)')
