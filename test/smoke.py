@@ -1114,9 +1114,12 @@ async def main():
         await page.fill('#saveNote', 'Site B'); await page.dispatch_event('#saveNote', 'change'); await page.wait_for_timeout(500)
         check(all(x[0] == 'Site B' for x in (await page.evaluate(sessq))[:5]) and await page.evaluate("!noteUndo.hidden && noteUndo.textContent.includes('Corner A, phone on the floor') && noteUndo.textContent.includes('7 earlier recordings')"),
               'a description that is replaced offers an undo that says what it puts back', await page.evaluate("noteUndo.textContent"))
+        await page.fill('#saveNote', 'Site C'); await page.dispatch_event('#saveNote', 'change'); await page.wait_for_timeout(500)
+        await page.fill('#saveNote', 'Site C, by the door'); await page.dispatch_event('#saveNote', 'change'); await page.wait_for_timeout(500)
+        check(await page.evaluate("!noteUndo.hidden && noteUndo.textContent.includes('Corner A, phone on the floor')") and (await page.evaluate(sessq))[0][0] == 'Site C, by the door', 'changing the text further still offers the way back to the first description', await page.evaluate("noteUndo.textContent"))
         await page.click('#noteUndo'); await page.wait_for_timeout(600)
         after = await page.evaluate(sessq)
-        check(all(x[0] == 'Corner A, phone on the floor' for x in after[:5]) and await page.evaluate("saveNote.value") == 'Site B' and await page.evaluate("noteUndo.hidden") and 'new session' in await page.evaluate("saveMsg.textContent"),
+        check(all(x[0] == 'Corner A, phone on the floor' for x in after[:5]) and await page.evaluate("saveNote.value") == 'Site C, by the door' and await page.evaluate("!!JSON.parse(localStorage.getItem('pyramid-res-chosen-session')).id") and await page.evaluate("noteUndo.hidden") and 'new session' in await page.evaluate("saveMsg.textContent"),
               'the undo puts the old description back on the earlier measurements and keeps the new text for a new session', after[:5])
         # the first measurement of the new session is deleted again: the next one must still not fall into the old session
         for again in range(2):
@@ -1129,7 +1132,7 @@ async def main():
             if again == 0:
                 await page.click('#savedList .rec [data-role=delete]'); await page.click('#savedList .rec [data-role=delete]'); await page.wait_for_timeout(500)
         fin = await page.evaluate(sessq)
-        check(len(fin) == 6 and fin[0][0] == 'Site B' and fin[0][1] != fin[1][1] and all(x[0] == 'Corner A, phone on the floor' and x[1] == fin[1][1] for x in fin[1:6]),
+        check(len(fin) == 6 and fin[0][0] == 'Site C, by the door' and fin[0][1] != fin[1][1] and all(x[0] == 'Corner A, phone on the floor' and x[1] == fin[1][1] for x in fin[1:6]),
               'after deleting the first measurement of a new session, the next one still belongs to the new session, and the old description is untouched', fin)
         # the app killed in the middle of a voice note: what was said up to the last few seconds is found afterwards
         await page.click('#voiceBtn'); await page.wait_for_timeout(7600)

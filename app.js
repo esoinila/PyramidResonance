@@ -1494,6 +1494,9 @@
     // Changing the description does not start a new session: the description is the session's, and may grow as it goes.
     const NOTE_MAX = 1000;
     let chosenSession = null;       // a new session started on purpose: { id, at }. It stays the session until 30 minutes pass in it.
+    const CHOSEN = 'pyramid-res-chosen-session';        // kept over a restart: the intent must not be lost with the page
+    try { const c = JSON.parse(localStorage.getItem(CHOSEN) || 'null'); if (c && R.isUuid(c.id) && typeof c.at === 'number') chosenSession = { id: c.id, at: c.at }; } catch (e) { /* none */ }
+    const keepChosen = () => { try { if (chosenSession) localStorage.setItem(CHOSEN, JSON.stringify(chosenSession)); else localStorage.removeItem(CHOSEN); } catch (e) { /* it still holds while the app is open */ } };
     let freshSession = null;        // the id for the next record when no session is going on
     const liveNewest = () => { const n = saved[0]; return n && n.sessionId && Date.now() - new Date(n.time).getTime() <= SESSION_GAP_MIN * 60000 ? n : null; };
     function currentSessionId() {
@@ -1502,7 +1505,7 @@
             const last = saved.find((r) => r.sessionId === chosenSession.id);
             const ref = last ? new Date(last.time).getTime() : chosenSession.at;
             if (Date.now() - ref <= SESSION_GAP_MIN * 60000) return chosenSession.id;
-            chosenSession = null;
+            chosenSession = null; keepChosen();
         }
         const newest = liveNewest();
         if (newest) { freshSession = null; return newest.sessionId; }
@@ -1512,32 +1515,45 @@
     const sessionIsNew = () => { const id = currentSessionId(); return !saved.some((r) => r.sessionId === id); };
     function startNewSession() {
         chosenSession = { id: R.uuid(), at: Date.now() };
+        keepChosen();
         lastPosition = null;
-        noteUndo(null);
     }
     // A description that was replaced rather than added to can be put back with one tap: the earlier
-    // measurements get their old text again, and the new text starts a session of its own.
+    // recordings get the text each of them had, and the new text starts a session of its own.
+    // undo: { key: the session, olds: id -> the text it had before the first replacement, text: what they carry now, show }
     let undo = null;
     function noteUndo(u) {
         undo = u;
         const b = document.getElementById('noteUndo');
         if (!b) return;
         b.hidden = !u;
-        if (u) b.textContent = 'Undo: keep "' + (u.old.length > 40 ? u.old.slice(0, 38) + '…' : u.old) + '" on the ' + u.ids.size + ' earlier recording' + (u.ids.size === 1 ? '' : 's') + ' of this session, and start a new session for the new text';
+        if (u) b.textContent = 'Undo: keep "' + (u.show.length > 40 ? u.show.slice(0, 38) + '…' : u.show) + '" on the ' + u.olds.size + ' earlier recording' + (u.olds.size === 1 ? '' : 's') + ' of this session, and start a new session for the new text';
     }
     function noteUndoTap() {
         const u = undo;
-        if (!u) return;
+        if (!u) return false;
         noteUndo(null);
         try {
-            const now = $('saveNote').value;
-            applySessionNote(u.key, u.ids, u.text, u.old);
-            $('saveNote').value = now; noteTyped();
+            // only those that still carry the text that replaced theirs: anything changed since is left as it is
+            const targets = saved.filter((r) => u.olds.has(r.id) && placeKey(r.sessionNote) === placeKey(u.text));
+            if (!targets.length) { saveNote('There was nothing left to undo: those recordings were changed or deleted since.'); return false; }
+            const editing = new Set(targets), writes = [];
+            targets.forEach((r) => {
+                const old = u.olds.get(r.id) || '';
+                r.sessionNote = old;
+                r.placeId = old ? placeIdFor(old, editing) : null;
+                touched(r);
+                writes.push(putRecord(r));
+            });
+            Promise.all(writes).catch((e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.'));
             startNewSession();
             renderSaved(); refreshPlaces(); summaries();
-            saveNote('The earlier measurements have their description back. The next measurement starts a new session.');
-        } catch (e) { saveNote('That could not be undone here: change the description on the Saved tab.', true); }
+            saveNote('The earlier recordings have their description back. The next measurement starts a new session.');
+            return true;
+        } catch (e) { saveNote('That could not be undone here: change the description on the Saved tab.', true); return false; }
     }
+    // a new session on purpose; if the description was just replaced for it, the earlier recordings get theirs back first
+    function newSessionNow() { if (!(undo && undo.key === currentSessionId() && noteUndoTap())) startNewSession(); }
     // What is written under the chart describes the session being measured: a change there reaches the
     // measurements the session already has, so that one description, grown along the way, covers the whole set.
     function syncSessionNote(fill) {
@@ -1551,8 +1567,11 @@
             if (text === sess.note) return;
             const ids = new Set(sess.records.filter((r) => placeKey(r.sessionNote) === placeKey(sess.note) || !placeKey(r.sessionNote)).map((r) => r.id));
             const old = sess.note, grew = !old || text.toLowerCase().includes(old.toLowerCase());
+            const olds = new Map(sess.records.filter((r) => ids.has(r.id)).map((r) => [r.id, r.sessionNote || '']));
             if (applySessionNote(sess.key, ids, old, text)) {
-                noteUndo(grew ? null : { key: sess.key, ids, old, text });       // added to: nothing is lost. Replaced: it can be put back
+                // an undo already offered for this session stays the same undo, back to the first text; else: added to, nothing is lost; replaced, it can be put back
+                if (undo && undo.key === sess.key && placeKey(undo.text) === placeKey(old)) noteUndo({ key: undo.key, olds: undo.olds, text, show: undo.show });
+                else noteUndo(grew ? null : { key: sess.key, olds, text, show: old });
                 renderSaved(); refreshPlaces(); summaries();
             }
         } catch (e) { /* the description still goes with the measurements made from now on */ }
@@ -1613,6 +1632,7 @@
     function refreshPlaces() {
         const box = $('placeBox'), host = $('placeChips');
         if (!box || !host) return;
+        if (undo && undo.key !== currentSessionId()) noteUndo(null);       // that session is over: its undo is no longer offered here
         host.textContent = '';
         const chip = (label, title, act) => {
             const b = document.createElement('button');
@@ -1621,11 +1641,11 @@
             host.appendChild(b);
         };
         const going = !sessionIsNew();
-        if (going) chip('New session, same description', '', () => { startNewSession(); saveNote('The next measurement starts a new session.'); refreshPlaces(); });
+        if (going) chip('New session, same description', '', () => { const put = !!undo; newSessionNow(); if (!put || !$('saveMsg').textContent.includes('new session')) saveNote('The next measurement starts a new session.'); refreshPlaces(); });
         const now = placeKey($('saveNote').value);
         placeNames().filter((n) => placeKey(n) !== now).slice(0, 6).forEach((n) => chip(n.length > 38 ? n.slice(0, 36) + '…' : n, n, () => {
+            if (going) newSessionNow();
             $('saveNote').value = n; noteTyped();
-            if (going) startNewSession();
             saveNote('The description was set to "' + (n.length > 60 ? n.slice(0, 58) + '…' : n) + '".' + (going ? ' The next measurement starts a new session.' : ''));
             refreshPlaces();
         }));
