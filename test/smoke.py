@@ -410,11 +410,12 @@ async def main():
         # keep only the newest, so the rest of this section can count
         while await page.evaluate("document.querySelectorAll('#savedList .rec').length") > 1:
             await page.click('#savedList .rec:last-child [data-role=delete]'); await page.click('#savedList .rec:last-child [data-role=delete]'); await page.wait_for_timeout(250)
-        # the note under the chart is for the measurements to come: it must not relabel the one already saved
+        # the description under the chart is the session's: it reaches the measurement the session already has
         await page.fill('#saveNote', 'Next room')
         check(await page.evaluate("localStorage.getItem('pyramid-res-note')") == 'Next room', 'the note for the next measurements is kept as it is typed, without leaving the field')
         await page.dispatch_event('#saveNote', 'change'); await page.wait_for_timeout(700)
-        check('Next room' not in await page.evaluate("document.querySelector('#savedList .session').textContent + document.querySelector('#savedList .rec .recNote').value + document.querySelector('#savedList .sessNote').value"), 'and it does not rename a measurement that is already saved')
+        check(await page.evaluate("document.querySelector('#savedList .sessNote').value") == 'Next room' and 'Next room' not in await page.evaluate("document.querySelector('#savedList .rec .recNote').value")
+              and await page.evaluate("document.querySelectorAll('#savedList .session').length") == 1, 'it describes the session being measured, so it reaches the measurement already saved; that one keeps its own note line')
         await page.fill('#saveNote', '')
         # each saved measurement has its own note
         await page.fill('#savedList .rec .recNote', 'Test room, niche 3'); await page.wait_for_timeout(900)
@@ -447,7 +448,7 @@ async def main():
         check(len(ids) == 2 and all(uu.match(i[0]) and uu.match(i[1]) for i in ids) and ids[0][0] != ids[1][0] and ids[0][1] == ids[1][1], 'each measurement has its own identifier and both share the session identifier', ids)
         # one note for the whole session; earlier places are offered as suggestions
         await page.fill('#savedList .sessNote', 'Test room'); await page.dispatch_event('#savedList .sessNote', 'change'); await page.wait_for_timeout(700)
-        check(await page.evaluate("saveNote.value") == 'Test room' and await page.evaluate("[...placeList.options].map(o => o.value).join()") == 'Test room', 'the session note is typed once for all its measurements and continues for the next ones')
+        check(await page.evaluate("saveNote.value") == 'Test room' and await page.evaluate("[...placeChips.querySelectorAll('.chip')].map(b => b.textContent).join()") == 'New session, same description' and await page.evaluate("!placeBox.hidden"), 'the session note is typed once for all its measurements and continues for the next ones')
         ids = await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll();
             g.onsuccess = () => { q.result.close(); done(g.result.map(r => [r.sessionNote, r.placeId, r.note])); }; }; })""")
         check(len(ids) == 2 and all(i[0] == 'Test room' and uu.match(i[1] or '') for i in ids) and ids[0][1] == ids[1][1] and sorted(i[2] for i in ids) == ['', 'Test room, niche 3'],
@@ -455,7 +456,7 @@ async def main():
         check(await page.evaluate("shareAll.hidden") and await page.evaluate("!!document.querySelector('[data-role=shareSession]')"), 'a session has its own send button')
         await page.click('#savedList .rec:last-child [data-role=show]'); await page.wait_for_timeout(300)
         check(await page.evaluate("chartTitle.textContent.startsWith('Saved: ') && chartTitle.textContent.includes('niche 3') && chartTitle.textContent.includes('Test room')"), 'a saved measurement can be shown again', await page.evaluate("chartTitle.textContent"))
-        check('117' in await page.evaluate("peaks.textContent"), 'with its peaks')
+        check('117' in await page.evaluate("peaks.textContent"), 'with its peaks', await page.evaluate("peaks.textContent.slice(0,300) + ' // ' + chartTitle.textContent"))
         await page.click('#next'); await page.wait_for_timeout(300)
         check(await page.evaluate("chartTitle.textContent.includes('clap spectrum')"), 'playing a tone returns to the live measurement')
         await page.click('#stop', force=True); await page.wait_for_timeout(200)
@@ -749,7 +750,7 @@ async def main():
         check(by['aaaa'][2] == 'pyorakellari 3' and by['aaaa'][3] == '' and by['aaaa'][5] and by['aaaa'][5] == by['bbbb'][5] and by['cccc'][2] == '' and by['cccc'][3] == 'door open' and by['dddd'][3] == '',
               'a note that a whole old session shared becomes its session note; differing notes stay with their measurements', got)
         check(await page.evaluate("document.querySelectorAll('#savedList .session').length") == 4 and await page.evaluate("!shareAll.hidden")
-              and await page.evaluate("[...placeList.options].map(o => o.value).sort().join()") == 'Alpha,Beta,pyorakellari 3' and 'Nothing was removed' in await page.evaluate("savedMsg.textContent"),
+              and set(await page.evaluate("[...placeChips.querySelectorAll('.chip')].map(b => b.title).filter(Boolean)")) == {'Alpha', 'Beta', 'pyorakellari 3'} - {await page.evaluate("saveNote.value")} and 'Nothing was removed' in await page.evaluate("savedMsg.textContent"),
               'the sessions are listed, with a button to send everything; old places are offered again and the page says what it regrouped', await page.evaluate("savedMsg.textContent"))
         check('place: Beta' in await page.evaluate("document.querySelector('#savedList .session .recs').textContent") and 'no location' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent"),
               'a measurement whose place differs from its session says so in its row, and a missing location shows without unfolding')
@@ -832,8 +833,12 @@ async def main():
         await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
         check('WITHOUT ITS SOUND' in await page.evaluate("saveMsg.textContent") and 'NO SOUND' in await page.evaluate("document.querySelector('#savedList .rec .flags').textContent")
               and 'NO SOUND' in await page.evaluate("recentList.children[0].textContent"), 'a clap saved without sound is marked NO SOUND under the chart and in both lists', await page.evaluate("saveMsg.textContent"))
-        # moving to another place starts a new session, even within minutes
-        await page.fill('#saveNote', 'Other place')
+        # moving to another place: a new session is started on purpose, even within minutes
+        firstNote = await page.evaluate("document.querySelector('#savedList .session .sessNote').value")
+        await page.click('#placeSummary'); await page.click('#placeChips .chip:first-child')
+        check('new session' in await page.evaluate("saveMsg.textContent") and await page.evaluate("[...placeChips.querySelectorAll('.chip')].every(b => !b.textContent.startsWith('New session'))"), 'a new session can be started with one tap, and the page says so')
+        await page.fill('#saveNote', 'Other place'); await page.dispatch_event('#saveNote', 'change'); await page.wait_for_timeout(400)
+        check(await page.evaluate("document.querySelector('#savedList .session .sessNote').value") == firstNote, 'what is typed for the new session does not touch the one before')
         await page.click('#clap')
         waited = 0
         while waited < 12000:
@@ -842,6 +847,22 @@ async def main():
         await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
         check(await page.evaluate("document.querySelectorAll('#savedList .session').length") == 2 and await page.evaluate("document.querySelector('#savedList .session .sessNote').value") == 'Other place',
               'a measurement at a different place starts a new session')
+        # the description grows as the session goes: it stays one session, whole, on every measurement
+        longer = 'Other place; ' + 'the last ones were in the right window corner on the floor, microphone towards the middle of the room. ' * 3
+        await page.fill('#saveNote', longer)
+        await page.click('#clap')
+        waited = 0
+        while waited < 12000:
+            await page.wait_for_timeout(100); waited += 100
+            if 'now' in (await page.evaluate("clap.textContent")).lower(): break
+        await page.evaluate("window.__clap()"); await page.wait_for_timeout(5200)
+        grown = await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll();
+            g.onsuccess = () => { q.result.close(); const all = g.result.sort((a, b) => a.time < b.time ? 1 : -1); done(all.slice(0, 2).map(r => [r.sessionNote, r.sessionId, r.placeId])); }; }; })""")
+        check(len(longer.strip()) > 300 and grown[0][0] == longer.strip() and grown[1][0] == longer.strip() and grown[0][1] == grown[1][1] and grown[0][2] == grown[1][2]
+              and await page.evaluate("document.querySelectorAll('#savedList .session').length") == 2 and await page.evaluate("document.querySelector('#savedList .session .sessNote').value") == longer.strip()
+              and await page.evaluate("document.querySelectorAll('#savedList .rec').length") == 3,
+              'a description changed in the middle of a session stays one session, and a long one is kept whole on every measurement', [[g[0][:30] + '… ' + str(len(g[0])), g[1][:6], (g[2] or '')[:6]] for g in grown] + [await page.evaluate("document.querySelectorAll('#savedList .session').length + ' sessions, ' + document.querySelectorAll('#savedList .rec').length + ' rows; ' + saveMsg.textContent + ' // ' + document.querySelector('#savedList .session .sessNote').value.length")])
+        await page.fill('#saveNote', 'Other place'); await page.dispatch_event('#saveNote', 'change'); await page.wait_for_timeout(500)
         # a clap that finishes while its session's note is being typed on the Saved tab ends up with the finished note, in the same session
         await page.click('#clap')
         waited = 0
@@ -851,13 +872,13 @@ async def main():
         await page.evaluate("window.__clap()")
         await page.click('#savedList .session:first-child .sessNote')
         await page.keyboard.press('End'); await page.keyboard.type(' ce', delay=60)
-        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 3", timeout=9000); await page.wait_for_timeout(500)
+        await page.wait_for_function("document.querySelectorAll('#savedList .rec').length === 4", timeout=9000); await page.wait_for_timeout(500)
         check(await page.evaluate("document.activeElement.classList.contains('sessNote') && document.activeElement.value") == 'Other place ce', 'a clap finishing while a session note is typed does not disturb the typing')
         await page.keyboard.type('llar', delay=60); await page.keyboard.press('Tab'); await page.wait_for_timeout(900)
         notes = await page.evaluate("""new Promise((done) => { const q = indexedDB.open('pyramid-res'); q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll();
             g.onsuccess = () => { q.result.close(); done(g.result.map(r => [r.sessionNote, r.sessionId, r.placeId])); }; }; })""")
         cellar = [n for n in notes if n[0] == 'Other place cellar']
-        check(len(notes) == 3 and len(cellar) == 2 and cellar[0][1] == cellar[1][1] and cellar[0][2] == cellar[1][2] and await page.evaluate("document.querySelectorAll('#savedList .session').length") == 2
+        check(len(notes) == 4 and len(cellar) == 3 and len(set(c[1] for c in cellar)) == 1 and len(set(c[2] for c in cellar)) == 1 and cellar[0][1] == cellar[1][1] and cellar[0][2] == cellar[1][2] and await page.evaluate("document.querySelectorAll('#savedList .session').length") == 2
               and await page.evaluate("saveNote.value") == 'Other place cellar', 'and that clap gets the finished note, in the same session and place as the others', notes)
 
         # ---- the motion sensor: how the phone lay, and whether it was moved since the previous measurement
@@ -1084,6 +1105,15 @@ async def main():
         await page.click('#savedList .voiceNote [data-role=delete]'); await page.click('#savedList .voiceNote [data-role=delete]')
         await page.wait_for_function("document.querySelectorAll('#savedList .voiceNote').length === 2", timeout=6000)
         check(len(await page.evaluate(allrecs)) == 2, 'a voice note is deleted with two taps, like a measurement')
+        # the app killed in the middle of a voice note: what was said up to the last few seconds is found afterwards
+        await page.click('#voiceBtn'); await page.wait_for_timeout(7600)
+        await page.evaluate("['visibilitychange', 'pagehide', 'beforeunload', 'freeze'].forEach(n => { document.addEventListener(n, e => e.stopImmediatePropagation(), true); window.addEventListener(n, e => e.stopImmediatePropagation(), true); })")
+        await page.reload()
+        await page.wait_for_function("document.querySelectorAll('#savedList .voiceNote').length === 3", timeout=6000)
+        cut = await page.evaluate("(() => { const q = indexedDB.open('pyramid-res'); return new Promise((done) => { q.onsuccess = () => { const g = q.result.transaction('records').objectStore('records').getAll(); g.onsuccess = () => { q.result.close(); done(g.result.filter(r => r.kind === 'voice' && r.interrupted).map(r => [r.audio.bytes, r.audio.durationS])); }; }; }); })()")
+        check(len(cut) == 1 and cut[0][0] > 2000 and cut[0][1] >= 5 and 'interrupted' in (await page.evaluate("document.querySelector('#savedList .voiceNote').textContent")).lower(), 'a voice note cut off by the app being killed is found afterwards, marked interrupted', cut)
+        await page.evaluate("document.querySelector('#savedList .voiceNote [data-role=playVoice]').click()"); await page.wait_for_timeout(700)
+        check(await page.evaluate("!!document.querySelector('#savedList .voiceNote audio')"), 'and it can be listened to')
         check(await page.evaluate("saveNote.tagName") == 'TEXTAREA' and await page.evaluate("document.querySelector('#savedList .sessNote').tagName") == 'TEXTAREA', 'the session description is a box of several lines, under the chart and on the Saved tab')
         await page.evaluate("clearInterval(window.__sensor)")
         await page.reload(); await page.wait_for_timeout(700)

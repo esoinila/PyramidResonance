@@ -517,75 +517,110 @@
     // A spoken note for the session: easier in the field than typing. It is recorded with the phone's own recorder
     // (small files), saved like a measurement (so it is never dropped: memory first, storage right after, retried),
     // listed with its session and sent in the session's zip.
-    const voice1 = { rec: null, chunks: [], t0: 0, timer: null, mime: '' };
+    const voice1 = { rec: null, record: null, chunks: [], t0: 0, timer: null, mime: '', stopping: false, finishing: false, watch: null, cp: null, cpAt: 0, cpBusy: false, limit: false };
     const VOICE_MAX_S = 300;
     const voiceOk = () => typeof MediaRecorder !== 'undefined';
+    const mmss = (secs) => { const s = Math.max(0, Math.round(secs)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
     function voiceButton() {
         const b = document.getElementById('voiceBtn');
         if (!b) return;
         if (!voiceOk()) { b.disabled = true; b.textContent = 'Voice notes are not possible on this phone'; return; }
-        if (voice1.rec) {
-            const s = Math.floor((Date.now() - voice1.t0) / 1000);
-            b.textContent = '■ Stop the voice note · ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
-        } else b.textContent = '● Record a voice note for this session';
+        if (voice1.rec) b.textContent = voice1.stopping ? 'Saving the voice note…' : '■ Stop the voice note · ' + mmss(Math.floor((Date.now() - voice1.t0) / 1000));
+        else b.textContent = '● Record a voice note for this session';
         b.setAttribute('aria-pressed', voice1.rec ? 'true' : 'false');
-        b.disabled = !voice1.rec && (clapBusy || recording || micBusy);
+        b.disabled = voice1.rec ? voice1.stopping : (clapBusy || recording || micBusy || voice1.finishing);
+    }
+    const voiceSound = async (chunks) => {
+        const blob = new Blob(chunks, { type: voice1.mime || chunks[0].type || 'audio/mp4' });
+        return { type: (blob.type || 'audio/mp4').split(';')[0], buffer: await blob.arrayBuffer() };
+    };
+    // What has been said so far is written to the phone every few seconds, as a voice note marked "interrupted".
+    // If the app is closed or killed in the middle, that copy is what is found on the Saved tab at the next start.
+    function voiceCheckpoint(r) {
+        if (voice1.rec !== r || voice1.stopping || voice1.finishing || voice1.cpBusy || !voice1.chunks.length) return;
+        voice1.cpBusy = true; voice1.cpAt = Date.now();
+        const rec = voice1.record, chunks = voice1.chunks.slice(), secs = (Date.now() - voice1.t0) / 1000;
+        voice1.cp = (async () => {
+            try {
+                const s = await voiceSound(chunks);
+                if (voice1.rec !== r || voice1.finishing) return;       // the finished note is being written: this copy must not replace it
+                const copy = Object.assign({}, rec, { interrupted: true, audio: { type: s.type, format: 'recorder', durationS: Number(secs.toFixed(1)), bytes: s.buffer.byteLength } });
+                await dbWrite(['records', 'audio'], (t) => { t.objectStore('audio').put({ type: s.type, buffer: s.buffer }, rec.id); return t.objectStore('records').put(copy); });
+            } catch (e) { /* the note is still held in memory and saved when it ends */ }
+            voice1.cpBusy = false;
+        })();
     }
     async function voiceToggle() {
         if (voice1.rec) { voiceStop(); return; }
-        if (!voiceOk() || clapBusy || recording) return;
+        if (!voiceOk() || clapBusy || recording || voice1.finishing) return;
         $('micWarn').textContent = '';
         if (!micOn && !micBusy) { await toggleMic(); }
-        if (!micOn || !micStream) return;       // refused or failed: the reason is on the page
+        if (!micOn || !micStream || voice1.rec) return;       // refused or failed: the reason is on the page
         try {
             const r = new MediaRecorder(micStream);
-            voice1.chunks = []; voice1.t0 = Date.now(); voice1.mime = r.mimeType || '';
-            r.addEventListener('dataavailable', (e) => { if (e.data && e.data.size) voice1.chunks.push(e.data); });
+            syncSessionNote();
+            voice1.chunks = []; voice1.t0 = Date.now(); voice1.mime = r.mimeType || ''; voice1.stopping = false; voice1.limit = false; voice1.cpAt = Date.now();
+            voice1.record = R.makeRecord({ time: new Date(voice1.t0), kind: 'voice', sessionNote: $('saveNote').value, sessionId: currentSessionId(), placeId: placeIdFor($('saveNote').value),
+                curve: [], peaks: [], app: BUILD, locationStatus: 'unavailable' });
+            r.addEventListener('dataavailable', (e) => { if (e.data && e.data.size && voice1.rec === r) voice1.chunks.push(e.data); });
             r.addEventListener('stop', () => voiceFinish(r));
-            r.addEventListener('error', () => voiceFinish(r));
+            r.addEventListener('error', () => voiceStop());
             r.start(1000);          // a piece every second, so that an abrupt end still leaves what was said
             voice1.rec = r;
-            voice1.timer = setInterval(() => { voiceButton(); if (Date.now() - voice1.t0 > VOICE_MAX_S * 1000) voiceStop(); }, 500);
+            voice1.timer = setInterval(() => {
+                voiceButton();
+                if (Date.now() - voice1.t0 > VOICE_MAX_S * 1000) { voice1.limit = true; voiceStop(); }
+                else if (Date.now() - voice1.cpAt > 5000) voiceCheckpoint(r);
+            }, 500);
         } catch (e) {
             voice1.rec = null;
             $('micWarn').textContent = 'The voice note could not start: ' + (e && e.message ? e.message : 'recorder error') + '.';
         }
         voiceButton();
     }
+    // Stopping waits for the recorder to hand over its last piece; if it never answers, what there is is saved anyway
     function voiceStop() {
         const r = voice1.rec;
-        if (!r) return;
-        try { if (r.state !== 'inactive') r.stop(); else voiceFinish(r); } catch (e) { voiceFinish(r); }
+        if (!r || voice1.stopping) return;
+        voice1.stopping = true;
+        try { if (r.state !== 'inactive') r.stop(); } catch (e) { /* the watchdog below saves what there is */ }
+        voice1.watch = setTimeout(() => voiceFinish(r), 1500);
+        voiceButton();
     }
     async function voiceFinish(r) {
-        if (voice1.rec !== r) return;
-        voice1.rec = null;
+        if (voice1.rec !== r || voice1.finishing) return;
+        voice1.finishing = true;        // counts as busy until the note is in the list
+        clearTimeout(voice1.watch); voice1.watch = null;
         clearInterval(voice1.timer); voice1.timer = null;
-        const chunks = voice1.chunks, started = voice1.t0, secs = (Date.now() - started) / 1000;
-        voice1.chunks = [];
-        voiceButton();
-        if (!chunks.length) { saveNote('The voice note recorded nothing, so there was nothing to save.', true); return; }
-        let buffer = null, type = '';
+        const chunks = voice1.chunks, rec = voice1.record, secs = (Date.now() - voice1.t0) / 1000, limit = voice1.limit;
         try {
-            const blob = new Blob(chunks, { type: voice1.mime || chunks[0].type || 'audio/mp4' });
-            type = (blob.type || 'audio/mp4').split(';')[0];
-            buffer = await blob.arrayBuffer();
-        } catch (e) { saveNote('The voice note could not be put together (' + (e && e.message ? e.message : 'error') + ').', true); return; }
-        const rec = R.makeRecord({ time: new Date(started), kind: 'voice', sessionNote: $('saveNote').value, sessionId: currentSessionId(), placeId: placeIdFor($('saveNote').value),
-            curve: [], peaks: [], app: BUILD, locationStatus: 'unavailable' });
-        rec.audio = { type, format: 'recorder', durationS: Number(secs.toFixed(1)), bytes: buffer.byteLength };
-        saved.unshift(rec);
-        saved.sort((a, b) => (a.time < b.time ? 1 : -1));
-        unstored.add(rec);
-        memAudio.set(rec.id, buffer);
-        forgetPrepared(rec);
-        renderSaved();
-        const ok = await storeRecord(rec);
-        renderSaved();
-        tabMarks();
-        const len = Math.floor(secs / 60) + ':' + String(Math.round(secs) % 60).padStart(2, '0');
-        saveNote(ok ? 'Voice note saved (' + len + '). It is with this session on the Saved tab and goes into the session\'s zip.'
-            : 'The voice note (' + len + ') is NOT STORED on the phone (' + storeError + '). It is held only while the app stays open: send the session now. The app keeps trying to store it.', !ok);
+            if (voice1.cp) { try { await voice1.cp; } catch (e) { /* ignore */ } }
+            if (!chunks.length) { saveNote('The voice note recorded nothing, so there was nothing to save.', true); return; }
+            let s = null;
+            try { s = await voiceSound(chunks); }
+            catch (e) { saveNote('The voice note could not be put together (' + (e && e.message ? e.message : 'error') + '). ' + (voice1.cpAt > voice1.t0 ? 'The copy written while recording is on the Saved tab after the app is opened again.' : ''), true); return; }
+            syncSessionNote();
+            rec.sessionNote = $('saveNote').value.trim().slice(0, NOTE_MAX);
+            rec.placeId = placeIdFor(rec.sessionNote);
+            rec.audio = { type: s.type, format: 'recorder', durationS: Number(secs.toFixed(1)), bytes: s.buffer.byteLength };
+            saved.unshift(rec);
+            saved.sort((a, b) => (a.time < b.time ? 1 : -1));
+            unstored.add(rec);
+            memAudio.set(rec.id, s.buffer);
+            forgetPrepared(rec);
+            voice1.rec = null; voice1.record = null; voice1.chunks = []; voice1.stopping = false;
+            renderSaved();
+            const ok = await storeRecord(rec);
+            renderSaved();
+            tabMarks();
+            const len = mmss(secs);
+            saveNote(ok ? 'Voice note saved (' + len + ')' + (limit ? ': it was stopped at the longest length of ' + mmss(VOICE_MAX_S) + ', start another to go on' : '') + '. It is with this session on the Saved tab and goes into the session\'s zip.'
+                : 'The voice note (' + len + ') is NOT STORED on the phone (' + storeError + '). It is held only while the app stays open: send the session now. The app keeps trying to store it.', !ok || limit);
+        } finally {
+            if (voice1.rec === r) { voice1.rec = null; voice1.record = null; voice1.chunks = []; }
+            voice1.stopping = false; voice1.finishing = false; voice1.cp = null; voice1.cpBusy = false;
+            voiceButton();
+        }
     }
 
     // ---------- Motion sensor ----------
@@ -1236,7 +1271,8 @@
         if (changed) { renderSaved(); tabMarks(); }
     }
     function storageNotice() {
-        if (unstored.size) return unstored.size + (unstored.size === 1 ? ' measurement is' : ' measurements are') + ' NOT STORED on the phone (' + (storeError || 'storage error') +
+        const noun = Array.from(unstored).some(isVoice) ? 'recording' : 'measurement';
+        if (unstored.size) return unstored.size + (unstored.size === 1 ? ' ' + noun + ' is' : ' ' + noun + 's are') + ' NOT STORED on the phone (' + (storeError || 'storage error') +
             '). They are held only while the app stays open: send them now from the Saved tab. The app keeps trying to store them.';
         return storageWarn;
     }
@@ -1450,11 +1486,40 @@
     const SESSION_GAP_MIN = 30;
     // A measurement made within half an hour of the previous one continues that session; otherwise a new one starts
     // ... and so does one made at a different place: a new place is a new session.
+    // A session goes on until 30 minutes pass without a measurement, or until a new one is started on purpose.
+    // Changing the description does not start a new session: the description is the session's, and may grow as it goes.
+    const NOTE_MAX = 1000;
+    let pendingSession = null;      // a new session started on purpose: the id waiting for its first record
+    let freshSession = null;        // the id for the next record when no session is going on
+    const liveNewest = () => { const n = saved[0]; return n && n.sessionId && Date.now() - new Date(n.time).getTime() <= SESSION_GAP_MIN * 60000 ? n : null; };
     function currentSessionId() {
-        const newest = saved[0];
-        if (newest && newest.sessionId && Date.now() - new Date(newest.time).getTime() <= SESSION_GAP_MIN * 60000 &&
-            placeKey(newest.sessionNote) === placeKey($('saveNote').value)) return newest.sessionId;
-        return R.uuid();
+        if (pendingSession && saved.some((r) => r.sessionId === pendingSession)) pendingSession = null;      // it has begun
+        if (pendingSession) return pendingSession;
+        const newest = liveNewest();
+        if (newest) { freshSession = null; return newest.sessionId; }
+        if (!freshSession || saved.some((r) => r.sessionId === freshSession)) freshSession = R.uuid();
+        return freshSession;        // the same one until a record carries it
+    }
+    const sessionIsNew = () => { const id = currentSessionId(); return id === pendingSession || id === freshSession; };
+    function startNewSession() {
+        pendingSession = R.uuid();
+        lastPosition = null;
+    }
+    // What is written under the chart describes the session being measured: a change there reaches the
+    // measurements the session already has, so that one description, grown along the way, covers the whole set.
+    function syncSessionNote(fill) {
+        try {
+            if (sessionIsNew()) return;      // a new session: nothing to bring up to date
+            const newest = liveNewest();
+            const sess = newest && R.sessions(saved, SESSION_GAP_MIN).find((x) => x.records.includes(newest));
+            if (!sess) return;
+            const text = $('saveNote').value.trim().slice(0, NOTE_MAX);
+            // an emptied field does not wipe a description: that is done on the Saved tab, on purpose
+            if (!text) { if (fill && sess.note) { $('saveNote').value = sess.note; noteTyped(); } return; }
+            if (text === sess.note) return;
+            const ids = new Set(sess.records.filter((r) => placeKey(r.sessionNote) === placeKey(sess.note) || !placeKey(r.sessionNote)).map((r) => r.id));
+            if (applySessionNote(sess.key, ids, sess.note, text)) { renderSaved(); refreshPlaces(); summaries(); }
+        } catch (e) { /* the description still goes with the measurements made from now on */ }
     }
     // A place keeps one identity under its name: the same name gives the same id, a new name a new id.
     // editing: the records whose note is being changed right now; they do not count as evidence for the new name.
@@ -1510,9 +1575,26 @@
         return changed;
     }
     function refreshPlaces() {
-        const places = $('placeList');
-        places.textContent = '';
-        placeNames().forEach((n) => { const o = document.createElement('option'); o.value = n; places.appendChild(o); });
+        const box = $('placeBox'), host = $('placeChips');
+        if (!box || !host) return;
+        host.textContent = '';
+        const chip = (label, title, act) => {
+            const b = document.createElement('button');
+            b.type = 'button'; b.className = 'chip'; b.textContent = label; if (title) b.title = title;
+            b.addEventListener('click', () => { act(); box.open = false; });
+            host.appendChild(b);
+        };
+        const going = !!liveNewest() && !sessionIsNew();
+        if (going) chip('New session, same description', '', () => { startNewSession(); saveNote('The next measurement starts a new session.'); refreshPlaces(); });
+        const now = placeKey($('saveNote').value);
+        placeNames().filter((n) => placeKey(n) !== now).slice(0, 6).forEach((n) => chip(n.length > 38 ? n.slice(0, 36) + '…' : n, n, () => {
+            $('saveNote').value = n; noteTyped();
+            if (going) startNewSession();
+            saveNote('The description was set to "' + (n.length > 60 ? n.slice(0, 58) + '…' : n) + '".' + (going ? ' The next measurement starts a new session.' : ''));
+            refreshPlaces();
+        }));
+        box.hidden = !host.childNodes.length;
+        $('placeSummary').textContent = going ? 'Start a new session, or use an earlier description' : 'Use an earlier description';
     }
     // A session note is applied when its field is left (or Enter is pressed), in one step.
     // ids: the measurements the field stands for, fixed when the field was drawn: those that carried the session's
@@ -1520,7 +1602,7 @@
     // never in that set, whatever is typed later. was: the text the field last stood for.
     const DRAFT = 'pyramid-res-session-note-draft';
     function applySessionNote(key, ids, was, text) {
-        text = String(text || '').trim().slice(0, 200);
+        text = String(text || '').trim().slice(0, NOTE_MAX);
         if (text === String(was || '').trim()) return false;            // nothing was changed: nothing is touched
         const sess = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === key);
         if (!sess) return false;
@@ -1538,7 +1620,7 @@
         });
         // the copy noted down while typing is thrown away only when every measurement has really been written
         Promise.all(writes).then(() => {
-            try { const d = JSON.parse(localStorage.getItem(DRAFT) || 'null'); if (d && d.key === key && String(d.text || '').trim().slice(0, 200) === text) localStorage.removeItem(DRAFT); } catch (e) { /* ignore */ }
+            try { const d = JSON.parse(localStorage.getItem(DRAFT) || 'null'); if (d && d.key === key && String(d.text || '').trim().slice(0, NOTE_MAX) === text) localStorage.removeItem(DRAFT); } catch (e) { /* ignore */ }
         }, (e) => savedMsg('The note could not be stored: ' + (e && e.message ? e.message : 'storage error') + '.'));
         // The session being measured right now: its note also goes with the next measurements,
         // unless something else has been typed under the chart for them meanwhile.
@@ -1557,13 +1639,13 @@
         if (!d || typeof d.key !== 'string' || typeof d.text !== 'string') { forget(); return; }
         const ids = new Set(String(d.ids || '').split(' ').filter(Boolean));
         // compared with what the measurements carry now, so a note that did get written before the app closed is not applied again
-        const want = d.text.trim().slice(0, 200);
+        const want = d.text.trim().slice(0, NOTE_MAX);
         const one = saved.find((r) => ids.has(r.id) && (r.sessionNote || '') !== want);      // one that the text has not reached yet
         if (!one || !applySessionNote(d.key, ids, one.sessionNote || '', d.text)) { forget(); return; }   // (applying it removes the draft once written)
         renderSaved();
         savedMsg(want ? 'A session note that was being typed when the app closed ("' + want.slice(0, 60) + '") was applied.' : 'A session note that was being cleared when the app closed was cleared.');
     }
-    const uncommittedNotes = () => Array.from(document.querySelectorAll('#savedList .sessNote')).some((i) => i.value.trim().slice(0, 200) !== (i.dataset.was || ''));
+    const uncommittedNotes = () => Array.from(document.querySelectorAll('#savedList .sessNote')).some((i) => i.value.trim().slice(0, NOTE_MAX) !== (i.dataset.was || ''));
     function commitSessionNotes(except) {
         let changed = false;
         document.querySelectorAll('#savedList .sessNote').forEach((input) => {
@@ -1571,7 +1653,7 @@
             const was = input.dataset.was || '';
             if (applySessionNote(input.dataset.id, idsOf(input), was, input.value)) {
                 changed = true;
-                input.dataset.was = input.value.trim().slice(0, 200);
+                input.dataset.was = input.value.trim().slice(0, NOTE_MAX);
                 // it now also stands for measurements of its session that already carried the new note
                 { const sess = R.sessions(saved, SESSION_GAP_MIN).find((x) => x.key === input.dataset.id), stood = idsOf(input);
                     if (sess) sess.records.forEach((r) => { if (placeKey(r.sessionNote) === placeKey(input.dataset.was)) stood.add(r.id); });
@@ -1586,6 +1668,7 @@
     const dateFi = (p) => { const d = p.date.split('-'); return Number(d[2]) + '.' + Number(d[1]) + '.' + d[0]; };
     const openRecs = new Set();     // records whose extra lines (location, photo, buttons) are unfolded
     let rebuilding = false;
+    const voiceUrls = new Set();    // sounds handed to the page's players, given back when the list is drawn again
     function renderSaved() {
         const host = $('savedList');
         // the list is rebuilt while a note may be being typed (a location arrives): keep the cursor where it was
@@ -1597,6 +1680,7 @@
         commitSessionNotes(typing && typing.cls === 'sessNote' ? active : null);
         rebuilding = true;      // fields removed from the page fire 'change' and 'blur' in some browsers: those are not the user's
         try {
+            voiceUrls.forEach((u) => { try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ } }); voiceUrls.clear();
             host.textContent = '';
             $('savedEmpty').hidden = saved.length > 0;
             summaries();
@@ -1684,7 +1768,7 @@
                     commitSessionNotes();
                 };
                 // what is being typed is also noted down at once, so that it survives the app being closed before the field is left
-                sNote.addEventListener('input', () => { if (sNote.value.trim().slice(0, 200) === (sNote.dataset.was || '')) dropDraft(sess.key); else saveDraft(sNote); });
+                sNote.addEventListener('input', () => { if (sNote.value.trim().slice(0, NOTE_MAX) === (sNote.dataset.was || '')) dropDraft(sess.key); else saveDraft(sNote); });
                 sNote.addEventListener('change', finish);
                 // 'change' does not always come on a phone, so leaving the field finishes the edit too
                 sNote.addEventListener('blur', () => setTimeout(finish, 0));
@@ -1722,9 +1806,12 @@
                         const old = box.querySelector('audio');
                         if (old) { try { URL.revokeObjectURL(old.src); } catch (e) { /* ignore */ } old.remove(); }
                         const a = document.createElement('audio');
+                        const cannot = () => savedMsg('This phone could not play the voice note here. It is stored, and it is in the session\'s zip: send the session and listen to it from there.');
                         a.controls = true; a.src = URL.createObjectURL(new Blob([buf], { type: (rec.audio && rec.audio.type) || 'audio/mp4' }));
+                        voiceUrls.add(a.src);
+                        a.addEventListener('error', cannot);
                         box.appendChild(a);
-                        a.play().catch(() => {});
+                        a.play().catch((e) => { if (!e || e.name !== 'AbortError') cannot(); });
                     });
                     row.appendChild(play);
                     const del = el('button', 'Delete', 'ghost'); del.type = 'button'; del.dataset.role = 'delete';
@@ -1906,9 +1993,10 @@
         const kind = curveKind;
         // the phone's position is a note beside the measurement: nothing about it may stop the save
         let phone = null;
-        try { phone = motionEnd(placeKey($('saveNote').value)); } catch (e) { phone = null; }
-        // Measurements made without moving the phone belong together: they share a position, and the note of that position.
+        syncSessionNote(true);
         const sid = currentSessionId();
+        try { phone = motionEnd(sid); } catch (e) { phone = null; }
+        // Measurements made without moving the phone belong together: they share a position, and the note of that position.
         // ("the previous one" is the last measurement the sensor saw, which need not be the newest row: that one may have been deleted)
         let positionId = null;
         try {
@@ -1954,9 +2042,9 @@
         if (!ok) {
             saveNote('NOT STORED on the phone (' + storeError + '). The measurement of ' + at + ' is in the Saved list, held only while the app stays open: send it from there now. The app keeps trying to store it.', true);
         } else if (kind === 'clap' && !rec.audio) {
-            saveNote(what + ', but WITHOUT ITS SOUND: the phone gave the app no raw sound for this clap. The spectrum and peaks are saved. Turn the microphone off and on before the next clap.' + where + ' It is number ' + saved.length + ' on the Saved tab.', true);
+            saveNote(what + ', but WITHOUT ITS SOUND: the phone gave the app no raw sound for this clap. The spectrum and peaks are saved. Turn the microphone off and on before the next clap.' + where + ' It is number ' + measured(saved).length + ' on the Saved tab.', true);
         } else {
-            saveNote(what + (rec.audio ? ', with the sound of the clap' : '') + '.' + where + ' It is number ' + saved.length + ' on the Saved tab (top of the page): open it there to add a photo or send it.');
+            saveNote(what + (rec.audio ? ', with the sound of the clap' : '') + '.' + where + ' It is number ' + measured(saved).length + ' on the Saved tab (top of the page): open it there to add a photo or send it.');
         }
         // ask the phone not to clear this data when it runs low on space, and say what it answered
         askPersist();
@@ -2171,7 +2259,7 @@
                 const a = await blobOf('audio', rec);
                 if (a) { parts.push({ name: b + R.soundExt(rec.audio.type), type: rec.audio.type || 'audio/wav', bytes: new Uint8Array(a), time: when }); sounds++; }
                 else { complete = false; missing.push('the sound of ' + recTitle(rec)); }
-            }
+            } else if (isVoice(rec)) { complete = false; missing.push('the voice note of ' + recTitle(rec)); }      // a voice note is its sound
             if (rec.photo) {
                 const p = await blobOf('photos', rec);
                 if (p) { parts.push({ name: b + '_photo.jpg', type: 'image/jpeg', bytes: new Uint8Array(p), time: when }); photos++; }
@@ -2179,7 +2267,8 @@
             }
             if (complete) whole.push(rec);
         }
-        const count = list.length + ' resonance measurement' + (list.length === 1 ? '' : 's');
+        const nm = measured(list).length, nv = list.length - nm;
+        const count = nm + ' resonance measurement' + (nm === 1 ? '' : 's') + (nv ? ' and ' + nv + ' voice note' + (nv === 1 ? '' : 's') : '');
         const holds = 'a .json file with all spectra, ' + sounds + ' sound file' + (sounds === 1 ? '' : 's') + ' and ' + photos + ' photo' + (photos === 1 ? '' : 's') + '.';
         let whyNot = 'This phone will not share a zip file';
         if (useZip) {
@@ -2198,7 +2287,7 @@
         return pack;
     }
     const prepareAll = () => prepareZip(saved.slice().reverse(), (() => { const g = R.sessions(saved, SESSION_GAP_MIN); const last = g[g.length - 1], first = g[0];
-        return last.start.date + '_to_' + first.end.date + '_all_' + saved.length + '-measurements'; })());
+        return last.start.date + '_to_' + first.end.date + '_all_' + measured(saved).length + '-measurements'; })());
 
     function download(files) {
         files.forEach((f, i) => setTimeout(() => {
@@ -2299,7 +2388,7 @@
             const sounds = new Set();
             try { const k = await tx('audio', 'readonly', (t) => t.objectStore('audio').getAllKeys()); (k || []).forEach((id) => sounds.add(id)); } catch (e) { /* the check below is then skipped */ }
             const here = new Set(saved.map((r) => r.id));       // measured before this answer came: those stay as they are
-            const fromDisk = all.filter((r) => !here.has(r.id) && !deleted.has(r.id));
+            const fromDisk = all.filter((r) => !here.has(r.id) && !deleted.has(r.id) && !(voice1.record && voice1.record.id === r.id));     // (a voice note still being recorded has a safety copy there)
             fromDisk.forEach((r) => {
                 // a location search cut short by closing the app will never finish
                 if (r.locationStatus === 'pending') r.locationStatus = r.location ? 'ok' : 'unavailable';
@@ -2507,7 +2596,7 @@
     });
     try { $('saveNote').value = localStorage.getItem('pyramid-res-note') || ''; } catch (e) { /* no stored note */ }
     $('saveNote').addEventListener('input', noteTyped);      // on every keystroke: iOS may never send 'change'
-    $('saveNote').addEventListener('change', noteTyped);
+    $('saveNote').addEventListener('change', () => { noteTyped(); if (!rebuilding) syncSessionNote(); });
     const again = () => { if (loadFailed) loadSaved().then(retryUnstored); else retryUnstored(); };
     setInterval(again, 15000);
     document.addEventListener('visibilitychange', () => { if (document.hidden) { commitSessionNotes(); try { voiceStop(); } catch (e) { /* an extra */ } } else { again(); try { expireTags(); if (!clapBusy) setClapButton(); } catch (e) { /* an extra */ } } });
@@ -2556,7 +2645,7 @@
     if (updater) updater.busy = () => {
         const a = document.activeElement;
         const typing = !!a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && (a.type === 'text' || a.type === 'number')));
-        return !!(voice || micOn || clapBusy || recording || curveState === 'done' || unstored.size || pendingWrites || locating || photoBusy || noteTimers.size || typing || uncommittedNotes() || voice1.rec);
+        return !!(voice || micOn || clapBusy || recording || curveState === 'done' || unstored.size || pendingWrites || locating || photoBusy || noteTimers.size || typing || uncommittedNotes() || voice1.rec || voice1.finishing);
     };
     syncInputs();
     if (!recompute()) {
